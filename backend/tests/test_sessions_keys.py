@@ -297,3 +297,21 @@ async def test_keys_reset_wipes_data(srv):
     assert r.status_code == 410 and r.json()["error"]["code"] == "cursor_expired"
     r = await srv.http.get("/api/v1/records", headers=s.h)
     assert r.json()["records"] == [] and r.json()["head"] == 1
+
+
+async def test_device_app_version_follows_client_header(srv):
+    # gravada no login (0.6.0); o app atualizado manda a versão nova em X-ClearChat-Client
+    s = await srv.signup()
+
+    async def version(header: str | None) -> str:
+        h = dict(s.h)
+        if header is not None:
+            h["X-ClearChat-Client"] = header
+        devs = (await srv.http.get("/api/v1/devices", headers=h)).json()
+        return next(d["app_version"] for d in devs if d["current"])
+
+    assert await version(None) == "0.6.0"
+    assert await version("desktop/0.6.1") == "0.6.1"
+    assert await version("web/9.9.9") == "0.6.1"  # client diferente do dispositivo: ignora
+    assert await version("desktop/0.7 beta") == "0.6.1"  # formato inválido: ignora
+    assert await version("desktop/0.7.0") == "0.7.0"

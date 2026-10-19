@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -145,14 +146,36 @@ async def authenticate(conn: AsyncConnection, token: str | None) -> Principal:
     )
 
 
-async def touch_device(conn: AsyncConnection, device_id: uuid.UUID, user_id: uuid.UUID, ip: str | None) -> None:
-    """Atualiza último acesso (no máximo 1×/min por dispositivo)."""
+CLIENT_HEADER_RE = re.compile(r"\A(desktop|mobile|web)/([0-9A-Za-z.+_-]{1,64})\Z")
+
+
+def client_version(header: str | None, client: str) -> str | None:
+    """Versão do app no cabeçalho `X-ClearChat-Client: <client>/<versão>` — só se o client bate com o do dispositivo."""
+    m = CLIENT_HEADER_RE.match(header or "")
+    return m.group(2) if m and m.group(1) == client else None
+
+
+async def touch_device(
+    conn: AsyncConnection,
+    device_id: uuid.UUID,
+    user_id: uuid.UUID,
+    ip: str | None,
+    app_version: str | None = None,
+) -> None:
+    """Atualiza último acesso (no máximo 1×/min por dispositivo) e a versão do app quando ela muda."""
     await execute(
         conn,
         "UPDATE devices SET last_seen_at = now(), last_ip = COALESCE(CAST(:ip AS inet), last_ip) "
         "WHERE id = :d AND (last_seen_at IS NULL OR last_seen_at < now() - interval '60 seconds')",
         {"d": device_id, "ip": ip},
     )
+    if app_version is not None:
+        # gravada no login e nunca mais: o app atualizado continuaria aparecendo com a versão antiga
+        await execute(
+            conn,
+            "UPDATE devices SET app_version = :v WHERE id = :d AND app_version IS DISTINCT FROM :v",
+            {"d": device_id, "v": app_version},
+        )
     await execute(
         conn,
         "UPDATE users SET last_seen_at = now() WHERE id = :u "
