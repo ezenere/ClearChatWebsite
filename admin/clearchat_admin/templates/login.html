@@ -1,12 +1,21 @@
-{% extends "base.html" %}{% block title %}Entrar{% endblock %}
-{% block content %}
-<div class="card" style="max-width:420px;margin:60px auto">
-  <h1>Painel admin</h1>
-  <p class="muted">Acesso só local (127.0.0.1). Use o <code>ADMIN_TOKEN</code> do <code>.env</code>.</p>
-  {% if error %}<p class="danger">{{ error }}</p>{% endif %}
-  <form method="post" action="/login">
-    <label>Token <input type="password" name="token" autocomplete="current-password" autofocus required></label>
-    <button>Entrar</button>
-  </form>
-</div>
+{% extends "base.html" %}{% from "_ui.html" import icon, logo with context %}{% block title %}Entrar{% endblock %}
+{% block body %}
+<main class="auth">
+  <div class="auth-card">
+    <span class="brand">{{ logo() }}<span class="brand-name">ClearChat<small>Admin</small></span></span>
+    <div>
+      <h1>Entrar no painel</h1>
+      <p class="lead">Use o <code>ADMIN_TOKEN</code> definido no <code>.env</code> do servidor.</p>
+    </div>
+    {% if error %}<div class="alert alert-error" role="alert">{{ icon("alert-circle") }}<span>{{ error }}</span></div>{% endif %}
+    <form method="post" action="/login" class="stack">
+      <div class="field">
+        <label for="token">Token de administrador</label>
+        <input class="input" id="token" type="password" name="token" autocomplete="current-password" autofocus required spellcheck="false">
+      </div>
+      <button class="btn btn-primary btn-block" type="submit">{{ icon("lock") }}Entrar</button>
+    </form>
+    <p class="auth-foot">{{ icon("shield") }}Acesso só pela máquina local ou rede interna. Sessão expira em 12 h.</p>
+  </div>
+</main>
 {% endblock %}

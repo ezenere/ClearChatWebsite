@@ -1,25 +1,101 @@
-{% extends "base.html" %}{% block title %}Convites{% endblock %}
+{% extends "base.html" %}{% from "_ui.html" import icon, csrf_field with context %}{% block title %}Convites{% endblock %}
+{% block head %}
+<header class="page-head">
+  <div>
+    <h1>Convites</h1>
+    <p class="lead">Links de uso único para criar conta mesmo com o cadastro fechado. O link só aparece uma vez, logo após ser gerado (o servidor guarda apenas o hash).</p>
+  </div>
+</header>
+{% endblock %}
 {% block content %}
-<h1>Convites</h1>
-{% if link %}<div class="card"><h2>Link de convite (mostrado só agora)</h2><p><code id="invite-link">{{ link }}</code></p></div>{% endif %}
-<div class="card">
-  <h2>Novo convite</h2>
-  <form method="post" action="/invites" class="inline">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="email" name="email" placeholder="e-mail (opcional: amarra o convite)">
-    <input name="note" placeholder="nota (opcional)">
-    <input type="number" name="days" min="1" max="365" placeholder="validade em dias ({{ settings.invite_ttl_days }})">
-    <label><input type="checkbox" name="send_email" value="1"> enviar por e-mail</label>
-    <button>Gerar link</button>
+{% if link %}
+<section class="card">
+  <div class="card-head">
+    <div><h2>Convite gerado</h2><p>Copie agora — por segurança ele não será mostrado de novo.{% if link_email %} Só vale para <strong>{{ link_email }}</strong>.{% endif %}{% if link_days %} Expira em {{ link_days }} dia{{ "s" if link_days != 1 }}.{% endif %}</p></div>
+    {% if link_mailed %}<span class="badge badge-success">{{ icon("mail") }}enviado por e-mail</span>{% endif %}
+  </div>
+  <div class="card-body">
+    <div class="linkbox">
+      <code id="invite-link">{{ link }}</code>
+      <button type="button" class="btn btn-primary btn-sm" data-copy="#invite-link" hidden>{{ icon("copy") }}<span class="label">Copiar link</span></button>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="card" id="novo">
+  <form method="post" action="/invites">
+    {{ csrf_field() }}
+    <div class="card-head"><div><h2>Novo convite</h2><p>Todos os campos são opcionais.</p></div></div>
+    <div class="card-body stack">
+      <div class="form-grid">
+        <div class="field">
+          <label for="inv-email">E-mail</label>
+          <input class="input" id="inv-email" type="email" name="email" placeholder="qualquer e-mail" autocomplete="off">
+          <span class="hint">Preenchido, o convite só vale para esse endereço.</span>
+        </div>
+        <div class="field">
+          <label for="inv-note">Nota</label>
+          <input class="input" id="inv-note" name="note" maxlength="200" placeholder="ex.: amigo do trabalho" autocomplete="off">
+          <span class="hint">Só aparece aqui no painel.</span>
+        </div>
+        <div class="field">
+          <label for="inv-days">Validade (dias)</label>
+          <input class="input" id="inv-days" type="number" name="days" min="1" max="365" placeholder="{{ settings.invite_ttl_days }}">
+          <span class="hint">De 1 a 365. Padrão: {{ settings.invite_ttl_days }} dias.</span>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" name="send_email" value="1"> Enviar o link por e-mail (exige e-mail preenchido)</label>
+    </div>
+    <div class="card-foot">
+      <span class="small muted">O link usa o endereço público <span class="mono">{{ settings.public_base_url }}</span>.</span>
+      <button class="btn btn-primary" type="submit">{{ icon("link") }}Gerar link</button>
+    </div>
   </form>
-</div>
-<div class="card">
-  <table><tr><th>Criado</th><th>E-mail</th><th>Nota</th><th>Expira</th><th>Estado</th><th></th></tr>
-  {% for i in invites %}
-  <tr><td>{{ i.created_at|dt }}</td><td>{{ i.email or "qualquer" }}</td><td>{{ i.note or "" }}</td><td>{{ i.expires_at|dt }}</td>
-    <td>{% if i.used_at %}usado por {{ i.used_email or "conta apagada" }}{% elif i.revoked_at %}revogado{% elif i.expires_at < now %}expirado{% else %}<span class="ok">válido</span>{% endif %}</td>
-    <td>{% if not i.used_at and not i.revoked_at %}<form method="post" action="/invites/{{ i.id }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Revogar</button></form>{% endif %}</td></tr>
-  {% else %}<tr><td colspan="6" class="muted">Nenhum convite.</td></tr>{% endfor %}
-  </table>
-</div>
+</section>
+
+<section class="card">
+  <div class="toolbar">
+    <h2>Convites emitidos</h2>
+    <span class="spacer"></span>
+    <div class="segmented" data-segment-for="invites-table" role="group" aria-label="Filtrar por estado">
+      <button type="button" data-value="all" aria-pressed="true">Todos <span class="n">{{ invites|length }}</span></button>
+      <button type="button" data-value="pending" aria-pressed="false">Pendentes <span class="n">{{ counts.pending }}</span></button>
+      <button type="button" data-value="used" aria-pressed="false">Usados <span class="n">{{ counts.used }}</span></button>
+      <button type="button" data-value="expired" aria-pressed="false">Expirados <span class="n">{{ counts.expired }}</span></button>
+      <button type="button" data-value="revoked" aria-pressed="false">Revogados <span class="n">{{ counts.revoked }}</span></button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="table roomy" id="invites-table">
+      <thead><tr><th>Para</th><th>Nota</th><th class="hide-md">Criado</th><th>Validade</th><th>Estado</th><th class="r"><span class="sr-only">Ações</span></th></tr></thead>
+      <tbody>
+      {% for it in invites %}{% set i = it.i %}
+        <tr data-row data-tags="{{ it.status }}">
+          <td>{% if i.email %}{{ i.email }}{% else %}<span class="muted">qualquer e-mail</span>{% endif %}</td>
+          <td class="wrap note">{% if i.note %}{{ i.note }}{% else %}<span class="subtle">—</span>{% endif %}</td>
+          <td class="hide-md">{{ i.created_at|ago }}</td>
+          <td>{% if it.status == "pending" %}expira {{ i.expires_at|ago }}{% elif it.status == "expired" %}expirou {{ i.expires_at|ago }}{% else %}<span class="subtle">—</span>{% endif %}</td>
+          <td class="status">
+            {% if it.status == "used" %}<span class="badge">{{ icon("check") }}usado</span><span class="cell-sub">por {% if i.used_by %}<a href="/users/{{ i.used_by }}">{{ i.used_email }}</a>{% else %}conta apagada{% endif %} · {{ i.used_at|ago }}</span>
+            {% elif it.status == "revoked" %}<span class="badge badge-danger">revogado</span><span class="cell-sub">{{ i.revoked_at|ago }}</span>
+            {% elif it.status == "expired" %}<span class="badge badge-warning">expirado</span>
+            {% else %}<span class="badge badge-success"><span class="dot"></span>pendente</span>{% endif %}
+          </td>
+          <td class="r">
+            {% if it.status in ("pending", "expired") %}
+            <form method="post" action="/invites/{{ i.id }}/revoke" class="inline" data-confirm="O link {% if i.email %}para {{ i.email }} {% endif %}deixa de funcionar imediatamente." data-confirm-title="Revogar convite?" data-confirm-ok="Revogar">
+              {{ csrf_field() }}<button class="btn btn-danger-outline btn-sm" type="submit">Revogar</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+        <tr data-empty {% if invites %}hidden{% endif %}>
+          <td colspan="6"><div class="empty">{{ icon("ticket") }}{% if invites %}<strong>Nenhum convite nesse estado</strong>{% else %}<strong>Nenhum convite ainda</strong><span>Gere o primeiro no formulário acima.</span>{% endif %}</div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endblock %}

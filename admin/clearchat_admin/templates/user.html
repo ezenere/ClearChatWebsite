@@ -1,61 +1,238 @@
-{% extends "base.html" %}{% block title %}{{ u.email }}{% endblock %}
+{% extends "base.html" %}{% from "_ui.html" import icon, bar, status_badges, quota_badge, kind, csrf_field with context %}{% block title %}{{ u.name }} · {{ u.email }}{% endblock %}
+
+{% macro usage_tone(used, limit) -%}
+{%- if limit is none -%}{%- elif limit == 0 or used >= limit -%}danger{%- elif used >= limit * 0.8 -%}warning{%- else -%}ok{%- endif -%}
+{%- endmacro %}
+
+{% macro size_quota(field, label, used, limit, hint) -%}
+{%- set val, unit = quota_split(limit) -%}
+<div class="field">
+  <label for="{{ field }}">{{ label }}</label>
+  <div class="input-group">
+    <input class="input" id="{{ field }}" name="{{ field }}" inputmode="decimal" value="{{ val }}" placeholder="ilimitado" autocomplete="off" pattern="[0-9]+([.,][0-9]+)?">
+    <select class="select" name="{{ field }}_unit" aria-label="Unidade de {{ label|lower }}">
+      {% for un in ("KB", "MB", "GB", "TB") %}<option value="{{ un }}" {{ "selected" if un == unit }}>{{ un }}</option>{% endfor %}
+      {% if unit == "B" %}<option value="B" selected>B</option>{% endif %}
+    </select>
+  </div>
+  <div class="usage">
+    {{ bar(used, limit if limit is not none else 0, tone=usage_tone(used, limit), cls="thin", label=label ~ " usado") }}
+    <div class="row"><span>Uso <strong>{{ used|human }}</strong>{% if limit is not none %} de {{ limit|human }}{% endif %}</span><span>{% if limit is none %}ilimitado{% else %}{{ pct(used, limit)|round(0)|int }}%{% endif %}</span></div>
+  </div>
+  <span class="hint">{{ hint }}</span>
+</div>
+{%- endmacro %}
+
+{% macro count_quota(field, label, used, limit, hint) -%}
+<div class="field">
+  <label for="{{ field }}">{{ label }}</label>
+  <input class="input" id="{{ field }}" name="{{ field }}" type="number" min="0" step="1" inputmode="numeric" value="{{ limit if limit is not none else '' }}" placeholder="ilimitado" autocomplete="off">
+  <div class="usage">
+    {{ bar(used, limit if limit is not none else 0, tone=usage_tone(used, limit), cls="thin", label=label ~ " usado") }}
+    <div class="row"><span>Uso <strong>{{ used|num }}</strong>{% if limit is not none %} de {{ limit|num }}{% endif %}</span><span>{% if limit is none %}ilimitado{% else %}{{ pct(used, limit)|round(0)|int }}%{% endif %}</span></div>
+  </div>
+  <span class="hint">{{ hint }}</span>
+</div>
+{%- endmacro %}
+
+{% block head %}
+<div>
+  <nav class="crumbs" aria-label="Navegação"><a href="/users">{{ icon("chevron-left") }}Usuários</a></nav>
+  <header class="page-head">
+    <div class="profile">
+      <span class="avatar lg{{ ' banned' if u.status == 'banned' }}" aria-hidden="true">{{ initials(u.name, u.email) }}</span>
+      <div class="who">
+        <h1>{{ u.name }}</h1>
+        <div class="meta">
+          <span>{{ u.email }}</span>
+          {% if u.status == 'banned' %}<span class="badge badge-danger">{{ icon("ban") }}banido</span>{% else %}<span class="badge badge-success"><span class="dot"></span>ativo</span>{% endif %}
+          {% if u.keys_ready %}<span class="badge">{{ icon("key") }}chaves configuradas</span>{% else %}<span class="badge badge-warning">sem chaves</span>{% endif %}
+          {{ quota_badge(quota) }}
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <a class="btn btn-secondary" href="#cotas">{{ icon("gauge") }}Cotas</a>
+      <a class="btn btn-danger-outline" href="#zona-de-perigo">{{ icon("alert") }}Zona de perigo</a>
+    </div>
+  </header>
+</div>
+{% endblock %}
+
 {% block content %}
-<h1>{{ u.email }} <span class="badge {{ 'banned' if u.status == 'banned' else '' }}">{{ u.status }}</span></h1>
-<div class="card">
-  <table>
-    <tr><th>Nome</th><td>{{ u.name }}</td><th>Criado</th><td>{{ u.created_at|dt }} ({{ u.created_by }})</td></tr>
-    <tr><th>Último acesso</th><td>{{ u.last_seen_at|dt }}</td><th>Chaves</th><td>{{ "configuradas" if u.keys_ready else "não configuradas" }} (rev {{ u.keys_rev }})</td></tr>
-    <tr><th>seq</th><td>{{ u.seq }}</td><th>Piso de tombstones</th><td>{{ u.tombstone_floor }}</td></tr>
-    {% if u.status == 'banned' %}<tr><th>Banido em</th><td>{{ u.banned_at|dt }}</td><th>Motivo</th><td>{{ u.banned_reason or "—" }}</td></tr>{% endif %}
-  </table>
+{% if u.status == 'banned' %}
+<div class="alert alert-error" role="status">{{ icon("ban") }}<span><strong>Conta banida</strong> {{ u.banned_at|ago }}{% if u.banned_reason %} — motivo: “{{ u.banned_reason }}”{% endif %}. Os dispositivos foram desconectados e o login não envia código.</span></div>
+{% endif %}
+
+<section class="stats" aria-label="Resumo">
+  <div class="stat"><span class="stat-label">{{ icon("database") }}Armazenamento</span><span class="stat-value">{{ (u.usage_record_bytes + u.usage_blob_bytes)|human }}</span><span class="stat-note">registros + anexos</span></div>
+  <div class="stat"><span class="stat-label">{{ icon("inbox") }}Registros</span><span class="stat-value">{{ u.usage_records|num }}</span><span class="stat-note">{{ u.usage_record_bytes|human }} · {{ tomb.n|num }} tombstones</span></div>
+  <div class="stat"><span class="stat-label">{{ icon("paperclip") }}Anexos</span><span class="stat-value">{{ blobs.n|num }}</span><span class="stat-note">{{ blobs.bytes|human }}{% if blobs.orphans %} · {{ blobs.orphans|num }} sem referência{% endif %}</span></div>
+  <div class="stat"><span class="stat-label">{{ icon("devices") }}Dispositivos</span><span class="stat-value">{{ active_devices|num }}{% if u.quota_devices is not none %}<small> / {{ u.quota_devices }}</small>{% endif %}</span><span class="stat-note">{{ devices|length - active_devices }} revogado{{ "s" if devices|length - active_devices != 1 }}</span></div>
+  <div class="stat"><span class="stat-label">{{ icon("clock") }}Última atividade</span><span class="stat-value">{{ u.last_seen_at|rel }}</span><span class="stat-note">conta criada {{ u.created_at|rel }}</span></div>
+</section>
+
+<div class="grid grid-3-2 top">
+  <section class="card">
+    <div class="card-head"><div><h2>Armazenamento por tipo</h2><p>O conteúdo é cifrado no cliente: só tipos e tamanhos são visíveis.</p></div></div>
+    <div class="card-body">
+      {% if storage or blobs.n %}
+      <ul class="bars">
+        {% for r in storage %}
+        <li>
+          <div class="row"><span class="label">{{ TYPE_LABELS.get(r.type, r.type) }}<span class="mono">{{ r.type }}</span></span><span class="value"><strong>{{ r.bytes|human }}</strong> · {{ r.n|num }} registro{{ "s" if r.n != 1 }}</span></div>
+          {{ bar(r.bytes, storage_max, label=r.type ~ ": " ~ (r.bytes|human)) }}
+        </li>
+        {% endfor %}
+        {% if blobs.n %}
+        <li>
+          <div class="row"><span class="label">Anexos (blobs)<span class="mono">blob</span></span><span class="value"><strong>{{ blobs.bytes|human }}</strong> · {{ blobs.n|num }} arquivo{{ "s" if blobs.n != 1 }}{% if blobs.orphans %} · {{ blobs.orphans }} sem referência{% endif %}</span></div>
+          {{ bar(blobs.bytes, storage_max, label="anexos: " ~ (blobs.bytes|human)) }}
+        </li>
+        {% endif %}
+      </ul>
+      {% else %}
+      <div class="empty">{{ icon("database") }}<strong>Sem registros</strong><span>A conta ainda não sincronizou nada.</span></div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Perfil</h2></div>
+    <div class="card-body">
+      <dl class="dl">
+        <dt>Nome</dt><dd>{{ u.name }}</dd>
+        <dt>E-mail</dt><dd>{{ u.email }}</dd>
+        <dt>Criada</dt><dd>{{ u.created_at|dt }} <span class="muted">via {{ CREATED_BY_LABELS.get(u.created_by, u.created_by) }}</span></dd>
+        <dt>Último acesso</dt><dd>{{ u.last_seen_at|dt }}</dd>
+        <dt>Chaves</dt><dd>{{ "configuradas" if u.keys_ready else "não configuradas" }} <span class="muted">· rev {{ u.keys_rev }} · versão {{ u.key_version }}</span></dd>
+        <dt>Sync</dt><dd class="mono">seq {{ u.seq|num }} · piso {{ u.tombstone_floor|num }}</dd>
+        <dt>ID</dt><dd class="mono subtle">{{ u.id }}</dd>
+      </dl>
+    </div>
+  </section>
 </div>
-<div class="card">
-  <h2>Armazenamento</h2>
-  <p class="muted">O conteúdo é cifrado no cliente: só tamanhos e tipos são visíveis.</p>
-  <table><tr><th>Tipo</th><th class="num">Registros</th><th class="num">Bytes</th></tr>
-  {% for r in by_type %}<tr><td>{{ r.type }}</td><td class="num">{{ r.n }}</td><td class="num">{{ r.bytes|human }}</td></tr>{% else %}<tr><td colspan="3" class="muted">Sem registros.</td></tr>{% endfor %}
-  <tr><td class="muted">tombstones</td><td class="num">{{ tomb.n }}</td><td></td></tr>
-  <tr><td><b>blobs</b></td><td class="num">{{ blobs.n }} ({{ blobs.orphans }} sem referência)</td><td class="num">{{ blobs.bytes|human }}</td></tr>
-  </table>
-</div>
-<div class="card">
-  <h2>Cotas</h2>
-  <p class="muted">Vazio = ilimitado. Uso atual: {{ u.usage_records }} registros, {{ u.usage_record_bytes|human }} de dados, {{ u.usage_blob_bytes|human }} de blobs.</p>
-  <form method="post" action="/users/{{ u.id }}/quotas" class="inline">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>Bytes de registros <input type="number" min="0" name="quota_record_bytes" value="{{ u.quota_record_bytes if u.quota_record_bytes is not none else '' }}"></label>
-    <label>Registros <input type="number" min="0" name="quota_records" value="{{ u.quota_records if u.quota_records is not none else '' }}"></label>
-    <label>Bytes de blobs <input type="number" min="0" name="quota_blob_bytes" value="{{ u.quota_blob_bytes if u.quota_blob_bytes is not none else '' }}"></label>
-    <label>Dispositivos <input type="number" min="0" name="quota_devices" value="{{ u.quota_devices if u.quota_devices is not none else '' }}"></label>
-    <button>Salvar cotas</button>
+
+<section class="card" id="cotas">
+  <form method="post" action="/users/{{ u.id }}/quotas">
+    {{ csrf_field() }}
+    <div class="card-head"><div><h2>Cotas</h2><p>Campo vazio = ilimitado. Tamanhos em base 1024 (1 GB = 1024 MB); aceita decimais com vírgula.</p></div></div>
+    <div class="card-body">
+      <div class="form-grid">
+        {{ size_quota("quota_record_bytes", "Dados de registros", u.usage_record_bytes, u.quota_record_bytes, "Soma dos registros cifrados.") }}
+        {{ size_quota("quota_blob_bytes", "Anexos (blobs)", u.usage_blob_bytes, u.quota_blob_bytes, "Arquivos enviados pelos apps.") }}
+        {{ count_quota("quota_records", "Número de registros", u.usage_records, u.quota_records, "Conversas, mensagens, memórias…") }}
+        {{ count_quota("quota_devices", "Dispositivos", active_devices, u.quota_devices, "Sessões ativas ao mesmo tempo.") }}
+      </div>
+    </div>
+    <div class="card-foot">
+      <span class="small muted">Acima da cota, o servidor recusa novos envios (413); nada é apagado.</span>
+      <button class="btn btn-primary" type="submit">{{ icon("save") }}Salvar cotas</button>
+    </div>
   </form>
-</div>
-<div class="card">
-  <h2>Dispositivos</h2>
-  <table><tr><th>Nome</th><th>Plataforma</th><th>Cliente</th><th>Versão</th><th>Host?</th><th>Último acesso</th><th>IP</th><th>Estado</th></tr>
-  {% for d in devices %}<tr><td>{{ d.name }}</td><td>{{ d.platform }}</td><td>{{ d.client }}</td><td>{{ d.app_version }}</td><td>{{ "sim" if d.can_host else "não" }}</td><td>{{ d.last_seen_at|dt }}</td><td>{{ d.last_ip or "—" }}</td><td>{{ "revogado " ~ (d.revoked_at|dt) if d.revoked_at else "ativo" }}</td></tr>{% else %}<tr><td colspan="8" class="muted">Nenhum.</td></tr>{% endfor %}
-  </table>
-  <form method="post" action="/users/{{ u.id }}/revoke-devices" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Desconectar todos os dispositivos</button></form>
-</div>
-<div class="card">
-  <h2>Uso por dia (30 dias)</h2>
-  <table><tr><th>Dia</th><th class="num">Pushes</th><th class="num">Itens</th><th class="num">Bytes</th><th class="num">Uploads</th><th class="num">Bytes de blobs</th></tr>
-  {% for d in daily %}<tr><td>{{ d.day }}</td><td class="num">{{ d.pushes }}</td><td class="num">{{ d.push_items }}</td><td class="num">{{ d.push_bytes|human }}</td><td class="num">{{ d.blob_uploads }}</td><td class="num">{{ d.blob_bytes|human }}</td></tr>{% else %}<tr><td colspan="6" class="muted">Sem uso.</td></tr>{% endfor %}
-  </table>
-</div>
-<div class="card">
-  <h2>Atividade</h2>
-  <table><tr><th>Quando</th><th>Evento</th><th>IP</th><th>Detalhes</th></tr>
-  {% for a in activity %}<tr><td>{{ a.at|dt }}</td><td>{{ a.kind }}</td><td>{{ a.ip or "—" }}</td><td class="muted">{{ a.meta or "" }}</td></tr>{% else %}<tr><td colspan="4" class="muted">Nada.</td></tr>{% endfor %}
-  </table>
-</div>
-<div class="card">
-  <h2>Ações</h2>
-  {% if u.status == 'banned' %}
-  <form method="post" action="/users/{{ u.id }}/unban" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Desbanir</button></form>
+</section>
+
+<section class="card" id="dispositivos">
+  <div class="card-head">
+    <div><h2>Dispositivos</h2><p>Cada login cria um dispositivo. Desconectar encerra a sessão dele.</p></div>
+    {% if active_devices %}
+    <form method="post" action="/users/{{ u.id }}/revoke-devices" data-confirm="Todas as {{ active_devices }} sessões ativas de {{ u.email }} serão encerradas. A pessoa precisará entrar de novo em cada aparelho." data-confirm-title="Desconectar todos os dispositivos?" data-confirm-ok="Desconectar todos">
+      {{ csrf_field() }}<button class="btn btn-danger-outline btn-sm" type="submit">{{ icon("logout") }}Desconectar todos</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if devices %}
+  <ul class="list">
+    {% for d in devices %}
+    {% set online = d.last_seen_at and not d.revoked_at and (now - d.last_seen_at).total_seconds() < 300 %}
+    <li class="{{ 'revoked' if d.revoked_at }}">
+      <span class="item-icon">{{ icon({"desktop": "monitor", "mobile": "phone"}.get(d.client, "globe")) }}{% if not d.revoked_at %}<span class="presence{{ ' on' if online }}"></span>{% endif %}</span>
+      <div class="item-main">
+        <span class="title">{{ d.name }}
+          {% if d.revoked_at %}<span class="badge">revogado {{ d.revoked_at|rel }}</span>{% elif online %}<span class="badge badge-success">online</span>{% endif %}
+          {% if d.can_host %}<span class="badge badge-accent" title="Pode executar conversas (host)">host</span>{% endif %}
+        </span>
+        <span class="sub">{{ CLIENT_LABELS.get(d.client, d.client) }} · {{ d.platform }} · v{{ d.app_version }}</span>
+        <span class="sub subtle">visto {{ d.last_seen_at|rel }}{% if d.last_ip %} · IP {{ d.last_ip }}{% endif %} · desde {{ d.created_at|dt }}</span>
+      </div>
+      {% if not d.revoked_at %}
+      <form method="post" action="/users/{{ u.id }}/devices/{{ d.id }}/revoke" data-confirm="“{{ d.name }}” perde o acesso e precisa entrar de novo. O que já foi baixado no aparelho não é apagado." data-confirm-title="Desconectar este dispositivo?" data-confirm-ok="Desconectar">
+        {{ csrf_field() }}<button class="btn btn-danger-outline btn-sm" type="submit">Desconectar</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
   {% else %}
-  <form method="post" action="/users/{{ u.id }}/ban" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="reason" placeholder="motivo (opcional)"><button class="danger">Banir (desconecta todos os dispositivos)</button></form>
+  <div class="empty">{{ icon("devices") }}<strong>Nenhum dispositivo</strong><span>A conta ainda não entrou em nenhum app.</span></div>
   {% endif %}
-  <form method="post" action="/users/{{ u.id }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="confirm_email" placeholder="digite {{ u.email }}" required><button class="danger">Apagar conta e todos os dados</button></form>
+</section>
+
+<div class="grid grid-2 top">
+  <section class="card">
+    <div class="card-head"><div><h2>Uso por dia</h2><p>Últimos 30 dias com atividade</p></div></div>
+    {% if daily %}
+    <div class="table-wrap scroll">
+      <table class="table">
+        <thead><tr><th>Dia</th><th class="r">Pushes</th><th class="r">Itens</th><th class="r">Dados</th><th class="r">Uploads</th><th class="r">Anexos</th></tr></thead>
+        <tbody>
+        {% for d in daily %}<tr><td>{{ d.day|weekday }} {{ d.day|day }}</td><td class="r">{{ d.pushes|num }}</td><td class="r">{{ d.push_items|num }}</td><td class="r">{{ d.push_bytes|human }}</td><td class="r">{{ d.blob_uploads|num }}</td><td class="r">{{ d.blob_bytes|human }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">{{ icon("activity") }}<strong>Sem uso registrado</strong></div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><div><h2>Atividade</h2><p>Últimos 50 eventos · só metadados</p></div></div>
+    {% if activity %}
+    <div class="scroll">
+      <ul class="timeline">
+        {% for a in activity %}
+        <li>
+          <span class="ev">{{ kind(a.kind) }}</span>
+          <span class="when">{{ a.at|ago }}</span>
+          {% if a.ip or a.meta %}<span class="det">{% if a.ip %}IP {{ a.ip }}{% endif %}{% if a.ip and a.meta %} · {% endif %}{% if a.meta %}<span class="mono">{{ a.meta|tojson }}</span>{% endif %}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% else %}
+    <div class="empty">{{ icon("activity") }}<strong>Nada registrado</strong></div>
+    {% endif %}
+  </section>
 </div>
+
+<section class="card danger-zone" id="zona-de-perigo">
+  <div class="card-head"><div><h2>{{ icon("alert") }}Zona de perigo</h2><p>Ações que afetam o acesso ou apagam dados desta conta.</p></div></div>
+  {% if u.status == 'banned' %}
+  <div class="toggle-row">
+    <div class="text"><strong>Reativar conta</strong><span>Volta a permitir login. Os dispositivos revogados continuam revogados.</span></div>
+    <form method="post" action="/users/{{ u.id }}/unban" data-confirm="{{ u.email }} poderá entrar de novo." data-confirm-title="Reativar a conta?" data-confirm-ok="Reativar" data-confirm-tone="accent">
+      {{ csrf_field() }}<button class="btn btn-success-outline" type="submit">{{ icon("unlock") }}Desbanir</button>
+    </form>
+  </div>
+  {% else %}
+  <form class="toggle-row" method="post" action="/users/{{ u.id }}/ban" data-confirm="Todos os dispositivos de {{ u.email }} serão desconectados na hora e o login deixa de enviar código. Dá para desfazer depois." data-confirm-title="Banir esta conta?" data-confirm-ok="Banir conta">
+    {{ csrf_field() }}
+    <div class="text"><strong>Banir conta</strong><span>Desconecta todos os dispositivos e bloqueia o login. Os dados ficam guardados.</span></div>
+    <div class="form-row">
+      <label class="sr-only" for="ban-reason">Motivo</label>
+      <input class="input" id="ban-reason" name="reason" maxlength="500" placeholder="Motivo (opcional, só para o painel)">
+      <button class="btn btn-danger-outline" type="submit">{{ icon("ban") }}Banir</button>
+    </div>
+  </form>
+  {% endif %}
+  <form class="toggle-row" method="post" action="/users/{{ u.id }}/delete" data-confirm="A conta {{ u.email }}, todos os registros, anexos e dispositivos serão apagados para sempre. Não há como desfazer." data-confirm-title="Apagar a conta definitivamente?" data-confirm-ok="Apagar para sempre">
+    {{ csrf_field() }}
+    <div class="text"><strong>Apagar conta e todos os dados</strong><span>Registros, anexos e dispositivos somem para sempre.</span><span>Para confirmar, digite <strong class="fg">{{ u.email }}</strong></span></div>
+    <div class="form-row">
+      <label class="sr-only" for="confirm-email">E-mail da conta</label>
+      <input class="input" id="confirm-email" name="confirm_email" placeholder="{{ u.email }}" autocomplete="off" spellcheck="false" required data-match="{{ u.email }}" data-match-target="delete-btn">
+      <button class="btn btn-danger" id="delete-btn" type="submit">{{ icon("trash") }}Apagar conta</button>
+    </div>
+  </form>
+</section>
 {% endblock %}

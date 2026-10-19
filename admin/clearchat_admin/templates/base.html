@@ -1,52 +1,55 @@
-<!doctype html>
+{% from "_ui.html" import icon, logo, flash_box, csrf_field with context %}<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>{% block title %}Admin{% endblock %} · ClearChat</title>
-<style>
-  :root { --bg:#f6f7f9; --fg:#15171a; --muted:#666c75; --card:#fff; --line:#e3e6ea; --accent:#2f5bd3; --danger:#c62828; --ok:#1b7f3b; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --fg:#e8eaed; --muted:#9aa0a8; --card:#1d2025; --line:#2c3037; --accent:#7aa2ff; --danger:#ff6b6b; --ok:#5fd38d; } }
-  * { box-sizing: border-box; }
-  body { margin:0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--fg); }
-  header { display:flex; gap:16px; align-items:center; padding:10px 16px; background: var(--card); border-bottom:1px solid var(--line); flex-wrap: wrap; }
-  header strong { margin-right: 8px; }
-  header a { color: var(--fg); text-decoration:none; padding:4px 8px; border-radius:6px; }
-  header a:hover { background: var(--bg); }
-  header form { margin-left:auto; }
-  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
-  .card { background: var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px; overflow-x:auto; }
-  h1 { font-size: 20px; margin: 4px 0 12px; } h2 { font-size: 16px; margin: 0 0 10px; }
-  table { border-collapse: collapse; width:100%; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space: nowrap; }
-  th { color: var(--muted); font-weight:600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
-  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
-  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:12px; }
-  .stat { background: var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
-  .stat b { display:block; font-size: 20px; } .stat span { color: var(--muted); font-size: 12px; }
-  .muted { color: var(--muted); } .danger { color: var(--danger); } .ok { color: var(--ok); }
-  input[type=text], input[type=email], input[type=password], input[type=number], input:not([type]) { padding:6px 8px; border:1px solid var(--line); border-radius:6px; background: var(--bg); color: var(--fg); min-width: 180px; }
-  button { padding:6px 12px; border-radius:6px; border:1px solid var(--line); background: var(--accent); color:#fff; cursor:pointer; }
-  button.secondary { background: transparent; color: var(--fg); } button.danger { background: var(--danger); border-color: var(--danger); }
-  form.inline { display:inline-flex; gap:8px; align-items:center; flex-wrap: wrap; margin: 4px 0; }
-  .flash { background: color-mix(in srgb, var(--ok) 15%, transparent); border:1px solid var(--ok); padding:8px 12px; border-radius:8px; margin-bottom:12px; }
-  .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
-  .badge.banned { color: var(--danger); border-color: var(--danger); }
-  code { font-size: 12px; word-break: break-all; }
-  label { display:flex; gap:8px; align-items:center; margin: 6px 0; }
-</style>
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<title>{% block title %}Admin{% endblock %} · ClearChat Admin</title>
+<link rel="preload" href="/static/inter-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/admin.css">
+<script src="/static/admin.js" defer></script>
 </head>
 <body>
-{% if csrf %}
-<header>
-  <strong>ClearChat · admin</strong>
-  <a href="/">Painel</a><a href="/users">Usuários</a><a href="/invites">Convites</a><a href="/settings">Instância</a>
-  <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Sair</button></form>
-</header>
-{% endif %}
-<main>
-  {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
-  {% block content %}{% endblock %}
-</main>
+{% block body %}
+<div class="shell">
+  <aside class="sidebar"><div class="sidebar-inner">
+    <a class="brand" href="/" aria-label="ClearChat Admin — visão geral">{{ logo() }}<span class="brand-name">ClearChat<small>Admin</small></span></a>
+    <nav class="nav" aria-label="Seções">
+      <a href="/" {% if nav == "dashboard" %}aria-current="page"{% endif %}>{{ icon("dashboard") }}<span>Visão geral</span></a>
+      <a href="/users" {% if nav == "users" %}aria-current="page"{% endif %}>{{ icon("users") }}<span>Usuários</span></a>
+      <a href="/invites" {% if nav == "invites" %}aria-current="page"{% endif %}>{{ icon("ticket") }}<span>Convites</span></a>
+      <a href="/settings" {% if nav == "settings" %}aria-current="page"{% endif %}>{{ icon("server") }}<span>Instância</span></a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="instance">
+        <strong>Painel local</strong>
+        <span title="{{ settings.public_base_url }}">{{ settings.public_base_url }}</span>
+      </div>
+      <form method="post" action="/logout">{{ csrf_field() }}<button class="btn btn-secondary btn-sm" type="submit">{{ icon("logout") }}<span>Sair</span></button></form>
+    </div>
+  </div></aside>
+  <main class="main" id="conteudo">
+    <div class="container">
+      {% block head %}{% endblock %}
+      {% if flash %}{{ flash_box(flash, "success") }}{% endif %}
+      {% if flash_error %}{{ flash_box(flash_error, "error") }}{% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+</div>
+<dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+  <div class="dlg-body">
+    <div class="dlg-icon">{{ icon("alert") }}</div>
+    <div><h2 id="confirm-title">Tem certeza?</h2><p id="confirm-text"></p></div>
+  </div>
+  <div class="dlg-actions">
+    <button type="button" class="btn btn-secondary" id="confirm-cancel">Cancelar</button>
+    <button type="button" class="btn btn-danger" id="confirm-ok">Confirmar</button>
+  </div>
+</dialog>
+{% endblock %}
 </body>
 </html>

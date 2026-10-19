@@ -1,2 +1,14 @@
-{% extends "base.html" %}{% block title %}{{ title }}{% endblock %}
-{% block content %}<div class="card"><h1>{{ title }}</h1><p>{{ text }}</p><p><a href="javascript:history.back()">Voltar</a></p></div>{% endblock %}
+{% extends "base.html" %}{% from "_ui.html" import icon, logo with context %}{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<section class="card msg-card">
+  <div class="msg" role="alert">
+    <span class="msg-icon">{{ icon("alert-circle") }}</span>
+    <h1>{{ title }}</h1>
+    <p>{{ text }}</p>
+  </div>
+  <div class="card-foot">
+    <span class="small muted">Nada foi alterado.</span>
+    <a class="btn btn-primary" href="{{ back or '/' }}" data-back>{{ icon("chevron-left") }}Voltar</a>
+  </div>
+</section>
+{% endblock %}

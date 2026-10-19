@@ -1,21 +1,81 @@
-{% extends "base.html" %}{% block title %}Usuários{% endblock %}
+{% extends "base.html" %}{% from "_ui.html" import icon, bar, status_badges, quota_badge with context %}{% block title %}Usuários{% endblock %}
+{% block head %}
+<header class="page-head">
+  <div>
+    <h1>Usuários</h1>
+    <p class="lead">{{ counts.all|num }} conta{{ "s" if counts.all != 1 }}{% if q %} para “{{ q }}”{% endif %}. Clique numa linha para ver armazenamento, dispositivos, cotas e ações.</p>
+  </div>
+  <div class="actions">
+    <a class="btn btn-primary" href="/users/new">{{ icon("user-plus") }}Criar usuário</a>
+  </div>
+</header>
+{% endblock %}
 {% block content %}
-<h1>Usuários</h1>
-<div class="card">
-  <form class="inline" method="get" action="/users"><input name="q" value="{{ q }}" placeholder="e-mail ou nome"><button>Buscar</button><a href="/users/new">+ Criar usuário</a></form>
-  <table>
-    <tr><th>E-mail</th><th>Nome</th><th>Status</th><th>Criado</th><th>Último acesso</th><th class="num">Disp.</th><th class="num">Registros</th><th class="num">Dados</th><th class="num">Blobs</th></tr>
-    {% for u in users %}
-    <tr>
-      <td><a href="/users/{{ u.id }}">{{ u.email }}</a></td><td>{{ u.name }}</td>
-      <td><span class="badge {{ 'banned' if u.status == 'banned' else '' }}">{{ u.status }}</span>{% if not u.keys_ready %} <span class="badge">sem chaves</span>{% endif %}</td>
-      <td>{{ u.created_at|dt }}</td><td>{{ u.last_seen_at|dt }}</td>
-      <td class="num">{{ u.n_devices }}</td>
-      <td class="num">{{ u.usage_records }}{% if u.quota_records is not none %} / {{ u.quota_records }}{% endif %}</td>
-      <td class="num">{{ u.usage_record_bytes|human }}{% if u.quota_record_bytes is not none %} / {{ u.quota_record_bytes|human }}{% endif %}</td>
-      <td class="num">{{ u.usage_blob_bytes|human }}{% if u.quota_blob_bytes is not none %} / {{ u.quota_blob_bytes|human }}{% endif %}</td>
-    </tr>
-    {% else %}<tr><td colspan="9" class="muted">Nenhum usuário.</td></tr>{% endfor %}
-  </table>
-</div>
+<section class="card">
+  <form class="toolbar" method="get" action="/users" role="search">
+    <label class="input-icon">
+      <span class="sr-only">Buscar por e-mail ou nome</span>
+      {{ icon("search") }}
+      <input class="input" id="user-filter" name="q" value="{{ q }}" placeholder="Filtrar por e-mail ou nome" title="Atalho: /" autocomplete="off" data-hotkey-search>
+    </label>
+    <div class="segmented" data-segment-for="users-table" role="group" aria-label="Filtrar por situação">
+      <button type="button" data-value="all" aria-pressed="true">Todos <span class="n">{{ counts.all }}</span></button>
+      <button type="button" data-value="active" aria-pressed="false">Ativos <span class="n">{{ counts.active }}</span></button>
+      <button type="button" data-value="banned" aria-pressed="false">Banidos <span class="n">{{ counts.banned }}</span></button>
+      <button type="button" data-value="nokeys" aria-pressed="false">Sem chaves <span class="n">{{ counts.nokeys }}</span></button>
+      <button type="button" data-value="quota" aria-pressed="false">Perto da cota <span class="n">{{ counts.quota }}</span></button>
+    </div>
+    <span class="spacer"></span>
+    <button class="btn btn-secondary btn-sm" type="submit">Buscar no servidor</button>
+    {% if q %}<a class="btn btn-ghost btn-sm" href="/users">{{ icon("x") }}Limpar</a>{% endif %}
+  </form>
+  <div class="table-wrap">
+    <table class="table" id="users-table" data-filter="user-filter">
+      <thead>
+        <tr>
+          <th data-sort="text"><button type="button" class="th-sort">Usuário{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th data-sort="num" class="hide-md"><button type="button" class="th-sort">Criado{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th data-sort="num"><button type="button" class="th-sort">Última atividade{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th data-sort="num" class="r"><button type="button" class="th-sort">Armazenamento{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th data-sort="num" class="r"><button type="button" class="th-sort">Disp.{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th data-sort="num"><button type="button" class="th-sort">Cota{{ icon("sort", "off") }}{{ icon("arrow-up", "on") }}</button></th>
+          <th>Situação</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for it in users %}{% set u = it.u %}
+        <tr data-row data-href="/users/{{ u.id }}" data-search="{{ u.name }} {{ u.email }}"
+            data-tags="{{ u.status }}{% if not u.keys_ready %} nokeys{% endif %}{% if it.quota.tone in ('warning', 'danger') %} quota{% endif %}">
+          <td data-v="{{ u.name|lower }}">
+            <div class="person">
+              <span class="avatar{{ ' banned' if u.status == 'banned' }}" aria-hidden="true">{{ initials(u.name, u.email) }}</span>
+              <span class="who"><a href="/users/{{ u.id }}">{{ u.name }}</a><span>{{ u.email }}</span></span>
+            </div>
+          </td>
+          <td data-v="{{ u.created_at|ts }}" class="hide-md">{{ u.created_at|ago }}</td>
+          <td data-v="{{ u.last_seen_at|ts }}">{{ u.last_seen_at|ago }}</td>
+          <td class="r" data-v="{{ it.storage }}">
+            <div class="cell-usage">
+              <span><strong>{{ it.storage|human }}</strong> <span class="subtle small hide-md">· {{ u.usage_records|num }} reg.</span></span>
+              {{ bar(it.storage, storage_max, cls="thin", label="armazenamento relativo") }}
+            </div>
+          </td>
+          <td class="r" data-v="{{ u.n_devices }}">{{ u.n_devices|num }}{% if u.quota_devices is not none %}<span class="subtle"> / {{ u.quota_devices }}</span>{% endif %}</td>
+          <td data-v="{{ '%.4f'|format(it.quota.ratio) if it.quota.tone != 'none' else -1 }}">{{ quota_badge(it.quota) }}</td>
+          <td>{% if u.status == 'banned' or not u.keys_ready %}{{ status_badges(u) }}{% else %}<span class="badge badge-success"><span class="dot"></span>ativo</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+        <tr data-empty {% if users %}hidden{% endif %}>
+          <td colspan="7">
+            <div class="empty">{{ icon("users") }}
+              {% if users %}<strong>Nenhum usuário com esse filtro</strong><span>Ajuste a busca ou escolha outra situação.</span>
+              {% elif q %}<strong>Nenhum resultado para “{{ q }}”</strong><span><a href="/users">Ver todos os usuários</a></span>
+              {% else %}<strong>Nenhum usuário ainda</strong><span>Crie uma conta ou gere um convite.</span>{% endif %}
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endblock %}

@@ -1,20 +1,69 @@
-{% extends "base.html" %}{% block title %}Instância{% endblock %}
-{% block content %}
-<h1>Configurações da instância</h1>
-<div class="card" style="max-width:640px">
-  <form method="post" action="/settings">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>Nome da instância <input name="instance_name" value="{{ cur.instance_name }}" maxlength="80"></label>
-    <label><input type="checkbox" name="signup_open" value="1" {{ "checked" if cur.signup_open }}> Cadastro aberto (fechado: só convites ou usuários criados aqui)</label>
-    <label><input type="checkbox" name="landing_enabled" value="1" {{ "checked" if cur.landing_enabled }}> Página inicial (landing) no site</label>
-    <label><input type="checkbox" name="captcha_enabled" value="1" {{ "checked" if cur.captcha_enabled }}> Captcha (Cloudflare Turnstile)</label>
-    <p class="muted">{% if keys %}Chaves Turnstile presentes no <code>.env</code>.{% else %}<span class="danger">Sem TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY no <code>.env</code>: o captcha fica desligado de qualquer forma</span> (os limites de taxa continuam).{% endif %}</p>
-    <label><input type="checkbox" disabled> Gateway de execução (reservado, desabilitado na v1)</label>
-    <button>Salvar</button>
-  </form>
+{% extends "base.html" %}{% from "_ui.html" import icon, csrf_field with context %}{% block title %}Instância{% endblock %}
+{% macro toggle(name, label, desc, checked, disabled=false, extra="") -%}
+<div class="toggle-row{{ ' is-disabled' if disabled }}">
+  <div class="text">
+    <strong id="lbl-{{ name }}">{{ label }}{{ extra }}</strong>
+    <span id="desc-{{ name }}">{{ desc }}</span>
+  </div>
+  <label class="switch">
+    <input type="checkbox" role="switch" name="{{ name }}" value="1" aria-labelledby="lbl-{{ name }}" aria-describedby="desc-{{ name }}" {{ "checked" if checked }} {{ "disabled" if disabled }}>
+    <span class="track" aria-hidden="true"></span>
+  </label>
 </div>
-<div class="card" style="max-width:640px">
-  <h2>Endereço público</h2>
-  <p><code>{{ settings.public_base_url }}</code> <span class="muted">(PUBLIC_BASE_URL no .env)</span></p>
+{%- endmacro %}
+{% block head %}
+<header class="page-head">
+  <div>
+    <h1>Instância</h1>
+    <p class="lead">Configurações gravadas no banco; a API aplica as mudanças em segundos (sem reiniciar).</p>
+  </div>
+</header>
+{% endblock %}
+{% block content %}
+<div class="grid grid-3-2">
+  <section class="card">
+    <form method="post" action="/settings">
+      {{ csrf_field() }}
+      <div class="card-head"><div><h2>Geral</h2><p>Nome e acesso ao cadastro</p></div></div>
+      <div class="card-body">
+        <div class="field">
+          <label for="instance_name">Nome da instância</label>
+          <input class="input" id="instance_name" name="instance_name" value="{{ cur.instance_name }}" maxlength="80" required>
+          <span class="hint">Aparece no site, nos e-mails e no app ao conectar.</span>
+        </div>
+      </div>
+      <div class="card-body flush">
+        {{ toggle("signup_open", "Cadastro aberto", "Desligado: só entra quem tiver convite ou for criado aqui no painel.", cur.signup_open) }}
+        {{ toggle("landing_enabled", "Página inicial pública", "A landing do site. Desligada, a raiz leva direto ao login.", cur.landing_enabled) }}
+        {% set captcha_extra %}{% if keys %} <span class="badge badge-success">{{ icon("check") }}chaves no .env</span>{% else %} <span class="badge badge-warning">{{ icon("alert") }}sem chaves</span>{% endif %}{% endset %}
+        {{ toggle("captcha_enabled", "Captcha (Cloudflare Turnstile)", "No cadastro e no pedido de código. Os limites de taxa valem sempre." if keys else "Sem TURNSTILE_SITE_KEY / TURNSTILE_SECRET_KEY no .env: fica desligado mesmo marcado.", cur.captcha_enabled, extra=captcha_extra) }}
+        {{ toggle("gateway_enabled", "Gateway de execução", "Reservado para uma versão futura; desabilitado na v1.", false, disabled=true, extra=' <span class="badge">em breve</span>'|safe) }}
+      </div>
+      <div class="card-foot">
+        <span class="small muted">As mudanças valem para novas requisições.</span>
+        <button class="btn btn-primary" type="submit">{{ icon("save") }}Salvar configurações</button>
+      </div>
+    </form>
+  </section>
+
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><h2>Estado atual</h2></div>
+      <div class="card-body">
+        <dl class="dl">
+          <dt>Cadastro</dt><dd>{% if cur.signup_open %}<span class="badge badge-success"><span class="dot"></span>aberto</span>{% else %}<span class="badge"><span class="dot"></span>só convites</span>{% endif %}</dd>
+          <dt>Landing</dt><dd>{% if cur.landing_enabled %}<span class="badge badge-success"><span class="dot"></span>pública</span>{% else %}<span class="badge"><span class="dot"></span>desligada</span>{% endif %}</dd>
+          <dt>Captcha</dt><dd>{% if cur.captcha_enabled and keys %}<span class="badge badge-success"><span class="dot"></span>ativo</span>{% elif cur.captcha_enabled %}<span class="badge badge-warning"><span class="dot"></span>marcado, sem chaves</span>{% else %}<span class="badge"><span class="dot"></span>desligado</span>{% endif %}</dd>
+        </dl>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head"><div><h2>Endereço público</h2><p>Definido por <span class="mono">PUBLIC_BASE_URL</span> no .env</p></div></div>
+      <div class="card-body">
+        <div class="linkbox"><code id="public-url">{{ settings.public_base_url }}</code><button type="button" class="btn btn-secondary btn-sm" data-copy="#public-url" hidden>{{ icon("copy") }}<span class="label">Copiar</span></button></div>
+      </div>
+    </section>
+    <div class="alert alert-info">{{ icon("info") }}<span>O painel nunca é exposto na internet: só em <span class="mono">127.0.0.1</span> ou na rede local (<span class="mono">ADMIN_ALLOWED_HOSTS</span>).</span></div>
+  </div>
 </div>
 {% endblock %}

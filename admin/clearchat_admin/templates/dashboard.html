@@ -1,23 +1,159 @@
-{% extends "base.html" %}{% block title %}Painel{% endblock %}
+{% extends "base.html" %}{% from "_ui.html" import icon, bar, kind with context %}{% block title %}Visão geral{% endblock %}
+{% block head %}
+<header class="page-head">
+  <div>
+    <h1>Visão geral</h1>
+    <p class="lead">Números agregados da instância. O conteúdo dos usuários é cifrado no dispositivo e nunca aparece aqui.</p>
+  </div>
+  <div class="actions">
+    <a class="btn btn-secondary" href="/users/new">{{ icon("user-plus") }}Criar usuário</a>
+    <a class="btn btn-primary" href="/invites#novo">{{ icon("plus") }}Novo convite</a>
+  </div>
+</header>
+{% endblock %}
 {% block content %}
-<h1>Painel</h1>
-<div class="grid" style="margin-bottom:16px">
-  <div class="stat"><b>{{ t.users }}</b><span>usuários ({{ t.banned }} banidos)</span></div>
-  <div class="stat"><b>{{ t.active7 }} / {{ t.active30 }}</b><span>ativos em 7 / 30 dias</span></div>
-  <div class="stat"><b>{{ t.devices }}</b><span>dispositivos ativos</span></div>
-  <div class="stat"><b>{{ t.records }}</b><span>registros ({{ t.record_bytes|human }})</span></div>
-  <div class="stat"><b>{{ t.blobs }}</b><span>blobs ({{ t.blob_bytes|human }})</span></div>
+<section class="stats" aria-label="Indicadores">
+  <div class="stat">
+    <span class="stat-label">{{ icon("users") }}Usuários</span>
+    <span class="stat-value">{{ t.users|num }}</span>
+    <span class="stat-note">{% if t.banned %}{{ t.banned|num }} banido{{ "s" if t.banned != 1 }}{% else %}nenhum banido{% endif %}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">{{ icon("activity") }}Ativos hoje</span>
+    <span class="stat-value">{{ t.active1|num }}</span>
+    <span class="stat-note">semana {{ t.active7|num }} · mês {{ t.active30|num }}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">{{ icon("database") }}Armazenamento</span>
+    <span class="stat-value">{{ storage_total|human }}</span>
+    <span class="stat-note" title="{{ t.record_bytes|human }} em registros + {{ t.blob_bytes|human }} em anexos">registros + anexos</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">{{ icon("inbox") }}Registros</span>
+    <span class="stat-value">{{ t.records|num }}</span>
+    <span class="stat-note">cifrados no cliente</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">{{ icon("paperclip") }}Anexos (blobs)</span>
+    <span class="stat-value">{{ t.blobs|num }}</span>
+    <span class="stat-note">{{ t.blob_bytes|human }} em disco</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">{{ icon("devices") }}Dispositivos</span>
+    <span class="stat-value">{{ t.devices|num }}</span>
+    <span class="stat-note">sessões ativas</span>
+  </div>
+</section>
+
+<div class="grid grid-3-2 top">
+<div class="stack">
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Usuários ativos por dia</h2><p>Últimos 14 dias · passe o mouse numa coluna para ver os detalhes</p></div>
+    </div>
+    <div class="card-body">
+      {% set n = chart|length %}
+      {% set top_pad = 20 %}{% set plot_h = 124 %}
+      <svg class="columns" role="img" aria-label="Usuários ativos por dia nos últimos 14 dias">
+        <line class="grid-line" x1="0" x2="100%" y1="{{ top_pad }}" y2="{{ top_pad }}"/>
+        <line class="grid-line" x1="0" x2="100%" y1="{{ top_pad + plot_h // 2 }}" y2="{{ top_pad + plot_h // 2 }}"/>
+        <line class="grid-line" x1="0" x2="100%" y1="{{ top_pad + plot_h }}" y2="{{ top_pad + plot_h }}"/>
+        {% for d in chart %}
+          {% set slot = 100.0 / n %}
+          {% set h = ((d.active|int) * plot_h / chart_max) if d.active else 0 %}
+          {% set label_it = (d.active|int == chart_max and d.active) or loop.last %}
+          <g class="c">
+            <title>{{ d.day|weekday }} {{ d.day|day }} — {{ d.active }} ativo{{ "s" if d.active != 1 }} · {{ d.logins }} login{{ "s" if d.logins != 1 }} · {{ d.signups }} cadastro{{ "s" if d.signups != 1 }} · {{ d.pushes|num }} pushes</title>
+            <rect class="col-hit" x="{{ '%.3f'|format(slot * loop.index0) }}%" y="0" width="{{ '%.3f'|format(slot) }}%" height="170"/>
+            {% if h > 0 %}<rect class="col" x="{{ '%.3f'|format(slot * loop.index0 + slot * 0.2) }}%" y="{{ '%.1f'|format(top_pad + plot_h - [h, 3]|max) }}" width="{{ '%.3f'|format(slot * 0.6) }}%" height="{{ '%.1f'|format([h, 3]|max) }}" rx="3"/>{% endif %}
+            {% if label_it %}<text class="v" x="{{ '%.3f'|format(slot * loop.index0 + slot / 2) }}%" y="{{ '%.1f'|format(top_pad + plot_h - [h, 3]|max - 6) }}" text-anchor="middle">{{ d.active }}</text>{% endif %}
+            {% if loop.index0 % 2 == (n - 1) % 2 %}<text x="{{ '%.3f'|format(slot * loop.index0 + slot / 2) }}%" y="{{ top_pad + plot_h + 18 }}" text-anchor="middle">{{ "hoje" if loop.last else d.day|day }}</text>{% endif %}
+          </g>
+        {% endfor %}
+      </svg>
+    </div>
+    <div class="mini-stats" aria-label="Totais de 14 dias">
+      <div><span>Logins</span><strong>{{ sums.logins|num }}</strong></div>
+      <div><span>Cadastros</span><strong>{{ sums.signups|num }}</strong></div>
+      <div><span>Falhas de login</span><strong class="{{ 'danger' if sums.failures }}">{{ sums.failures|num }}</strong></div>
+      <div><span>Pushes</span><strong>{{ sums.pushes|num }}</strong></div>
+      <div><span>Uploads</span><strong>{{ sums.uploads|num }}</strong></div>
+    </div>
+    <details class="more">
+      <summary>{{ icon("chevron-right") }}Ver tabela por dia</summary>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Dia</th><th class="r">Ativos</th><th class="r">Logins</th><th class="r">Cadastros</th><th class="r">Falhas</th><th class="r">Pushes</th><th class="r">Uploads</th></tr></thead>
+          <tbody>
+          {% for d in days %}<tr><td>{{ d.day|weekday }} {{ d.day|day }}</td><td class="r">{{ d.active|num }}</td><td class="r">{{ d.logins|num }}</td><td class="r">{{ d.signups|num }}</td><td class="r">{% if d.failures %}<span class="badge badge-danger">{{ d.failures|num }}</span>{% else %}0{% endif %}</td><td class="r">{{ d.pushes|num }}</td><td class="r">{{ d.uploads|num }}</td></tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Quem mais ocupa espaço</h2><p>Registros + anexos por usuário</p></div>
+      <a class="btn btn-ghost btn-sm" href="/users">Todos os usuários{{ icon("chevron-right") }}</a>
+    </div>
+    <div class="card-body">
+      {% if top %}
+      <ul class="bars">
+        {% for u in top %}
+        <li>
+          <div class="row"><a class="label" href="/users/{{ u.id }}">{{ u.name }} <span class="email">{{ u.email }}</span></a><span class="value"><strong>{{ u.total|human }}</strong></span></div>
+          {{ bar(u.total, top_max, label=u.email ~ ": " ~ (u.total|human)) }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty">{{ icon("users") }}<strong>Ninguém sincronizou dados ainda</strong></div>
+      {% endif %}
+    </div>
+  </section>
+
 </div>
-<div class="card">
-  <h2>Atividade por dia (14 dias)</h2>
-  <table><tr><th>Dia</th><th class="num">Logins</th><th class="num">Cadastros</th><th class="num">Falhas</th><th class="num">Pushes</th><th class="num">Uploads</th><th class="num">Usuários ativos</th></tr>
-  {% for d in days %}<tr><td>{{ d.day }}</td><td class="num">{{ d.logins }}</td><td class="num">{{ d.signups }}</td><td class="num">{{ d.failures }}</td><td class="num">{{ d.pushes }}</td><td class="num">{{ d.uploads }}</td><td class="num">{{ d.active }}</td></tr>{% endfor %}
-  </table>
+<div class="stack">
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Armazenamento por tipo</h2><p>Tamanho cifrado · {{ storage_total|human }} no total</p></div>
+    </div>
+    <div class="card-body">
+      {% if storage %}
+      <ul class="bars">
+        {% for r in storage %}
+        <li>
+          <div class="row"><span class="label">{{ TYPE_LABELS.get(r.type, r.type) }}<span class="mono">{{ r.type }}</span></span><span class="value"><strong>{{ r.bytes|human }}</strong> · {{ r.n|num }}</span></div>
+          {{ bar(r.bytes, storage_max, label=TYPE_LABELS.get(r.type, r.type) ~ ": " ~ (r.bytes|human)) }}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty">{{ icon("database") }}<strong>Nada armazenado ainda</strong><span>Os tipos aparecem quando os apps sincronizarem.</span></div>
+      {% endif %}
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head">
+      <div><h2>Eventos recentes</h2><p>Últimos 30 · só metadados</p></div>
+    </div>
+    <div class="card-body flush scroll short">
+      {% if recent %}
+      <ul class="timeline">
+        {% for a in recent %}
+        <li>
+          <span class="ev">{{ kind(a.kind) }}</span>
+          <span class="when">{{ a.at|ago }}</span>
+          <span class="det">{{ a.email or "sem usuário" }}{% if a.ip %} · {{ a.ip }}{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty">{{ icon("activity") }}<strong>Nada ainda</strong><span>Logins, cadastros e ações do painel aparecem aqui.</span></div>
+      {% endif %}
+    </div>
+  </section>
 </div>
-<div class="card">
-  <h2>Eventos recentes</h2>
-  <table><tr><th>Quando</th><th>Evento</th><th>Usuário</th><th>IP</th></tr>
-  {% for a in recent %}<tr><td>{{ a.at|dt }}</td><td>{{ a.kind }}</td><td>{{ a.email or "—" }}</td><td>{{ a.ip or "—" }}</td></tr>{% else %}<tr><td colspan="4" class="muted">Nada ainda.</td></tr>{% endfor %}
-  </table>
 </div>
 {% endblock %}

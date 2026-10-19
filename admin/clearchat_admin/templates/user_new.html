@@ -1,15 +1,37 @@
-{% extends "base.html" %}{% block title %}Criar usuário{% endblock %}
-{% block content %}
-<h1>Criar usuário</h1>
-<div class="card" style="max-width:560px">
-  <p class="muted">A conta nasce sem chaves: a pessoa entra por código e define a senha de criptografia no site (<code>/setup</code>).</p>
-  {% if error %}<p class="danger">{{ error }}</p>{% endif %}
-  <form method="post" action="/users/new">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>E-mail <input type="email" name="email" required></label>
-    <label>Nome <input type="text" name="name" required maxlength="100"></label>
-    <label><input type="checkbox" name="send_welcome" value="1" checked> Enviar e-mail de boas-vindas com o link de login</label>
-    <button>Criar</button>
-  </form>
+{% extends "base.html" %}{% from "_ui.html" import icon, csrf_field with context %}{% block title %}Criar usuário{% endblock %}
+{% block head %}
+<div>
+  <nav class="crumbs" aria-label="Navegação"><a href="/users">{{ icon("chevron-left") }}Usuários</a></nav>
+  <header class="page-head">
+    <div>
+      <h1>Criar usuário</h1>
+      <p class="lead">A conta nasce sem chaves: a pessoa entra por código no e-mail e define a senha de criptografia no site (<code>/setup</code>).</p>
+    </div>
+  </header>
 </div>
+{% endblock %}
+{% block content %}
+<section class="card">
+  <form method="post" action="/users/new">
+    {{ csrf_field() }}
+    <div class="card-body stack">
+      {% if error %}<div class="alert alert-error" role="alert">{{ icon("alert-circle") }}<span>{{ error }}</span></div>{% endif %}
+      <div class="form-grid">
+        <div class="field">
+          <label for="email">E-mail</label>
+          <input class="input" id="email" type="email" name="email" required autocomplete="off" value="{{ form.email if form else '' }}" placeholder="pessoa@exemplo.com">
+        </div>
+        <div class="field">
+          <label for="name">Nome</label>
+          <input class="input" id="name" type="text" name="name" required maxlength="100" autocomplete="off" value="{{ form.name if form else '' }}" placeholder="Como aparece no app">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" name="send_welcome" value="1" checked> Enviar e-mail de boas-vindas com o link de login</label>
+    </div>
+    <div class="card-foot">
+      <a class="btn btn-ghost" href="/users">Cancelar</a>
+      <button class="btn btn-primary" type="submit">{{ icon("user-plus") }}Criar usuário</button>
+    </div>
+  </form>
+</section>
 {% endblock %}

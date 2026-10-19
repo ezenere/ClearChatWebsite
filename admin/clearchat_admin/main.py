@@ -8,8 +8,8 @@ token CSRF em todo formulário; 5 tentativas de login/min por IP. Nunca mostra c
 from __future__ import annotations
 
 import hashlib
-import os
 import hmac
+import os
 import secrets
 import uuid
 from collections.abc import AsyncIterator
@@ -22,7 +22,8 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from clearchat_server.config import Settings
 from clearchat_server.db import execute, fetchall, fetchone, make_engine
@@ -34,6 +35,8 @@ from clearchat_server.services import accounts as acc
 from clearchat_server.sync.blobs import BlobStore
 from clearchat_server.util import client_ip, normalize_email, valid_email
 
+from . import ui
+
 SESSION_COOKIE = "cc_admin"
 SESSION_MAX_AGE = 12 * 3600
 # Hosts extras aceitos no cabeçalho Host (ex.: o IP da rede local), via ADMIN_ALLOWED_HOSTS no .env.
@@ -43,27 +46,46 @@ ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"} | {
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
-def _human(n: Any) -> str:
-    if n is None:
-        return "—"
-    n = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024 or unit == "TiB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return str(n)
+ui.register(TEMPLATES.env)
+STATIC_DIR = Path(__file__).parent / "static"
+
+# CSP estrita: só recursos do próprio painel (CSS, JS e a fonte Inter servidos de /static), nada inline.
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+)
+SECURITY_HEADERS = [
+    (b"content-security-policy", CSP.encode()),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"cache-control", b"no-store"),
+]
 
 
-def _dt(v: Any) -> str:
-    if v is None:
-        return "—"
-    if isinstance(v, datetime):
-        return v.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    return str(v)
+class SecurityHeaders:
+    """CSP e cabeçalhos defensivos em toda resposta (os estáticos podem ir para o cache)."""
 
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-TEMPLATES.env.filters["human"] = _human
-TEMPLATES.env.filters["dt"] = _dt
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        static = scope.get("path", "").startswith("/static/")
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control" or static]
+                for k, v in SECURITY_HEADERS:
+                    if k == b"cache-control" and static:
+                        continue
+                    headers.append((k, v))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class HostGuard:
@@ -115,6 +137,8 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
 
     app = FastAPI(title="ClearChat Admin", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(HostGuard)
+    app.add_middleware(SecurityHeaders)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # ---------------------------------------------------------- sessão e CSRF
     def session(request: Request) -> dict[str, Any] | None:
@@ -134,6 +158,8 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
             "csrf": s["csrf"] if s else "",
             "settings": settings,
             "flash": request.query_params.get("ok"),
+            "flash_error": request.query_params.get("err"),
+            "now": datetime.now(UTC),
         }
         return TEMPLATES.TemplateResponse(request, name, {**base, **ctx}, status_code=status)
 
@@ -201,6 +227,7 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 c,
                 "SELECT (SELECT count(*) FROM users) AS users, "
                 "(SELECT count(*) FROM users WHERE status = 'banned') AS banned, "
+                "(SELECT count(*) FROM users WHERE last_seen_at > now() - interval '1 day') AS active1, "
                 "(SELECT count(*) FROM users WHERE last_seen_at > now() - interval '7 days') AS active7, "
                 "(SELECT count(*) FROM users WHERE last_seen_at > now() - interval '30 days') AS active30, "
                 "(SELECT count(*) FROM devices WHERE revoked_at IS NULL) AS devices, "
@@ -227,7 +254,43 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 "SELECT a.kind, a.ip, a.at, a.meta, u.email FROM activity a LEFT JOIN users u ON u.id = a.user_id "
                 "ORDER BY a.at DESC LIMIT 30",
             )
-        return render(request, "dashboard.html", {"t": totals, "days": days, "recent": recent})
+            by_type = await fetchall(
+                c,
+                "SELECT type, count(*) AS n, COALESCE(sum(size), 0) AS bytes FROM records WHERE NOT deleted "
+                "GROUP BY type ORDER BY bytes DESC",
+            )
+            top = await fetchall(
+                c,
+                "SELECT id, email, name, status, usage_record_bytes, usage_blob_bytes, "
+                "usage_record_bytes + usage_blob_bytes AS total FROM users "
+                "WHERE usage_record_bytes + usage_blob_bytes > 0 ORDER BY total DESC LIMIT 8",
+            )
+        storage = [{"type": r.type, "n": r.n, "bytes": int(r.bytes)} for r in by_type]
+        if totals and totals.blobs:
+            storage.append({"type": "blob", "n": totals.blobs, "bytes": int(totals.blob_bytes)})
+        storage.sort(key=lambda r: r["bytes"], reverse=True)
+        chart = list(reversed(days))  # mais antigo → mais recente
+        sums = {
+            k: sum(int(getattr(d, k)) for d in days) for k in ("logins", "signups", "failures", "pushes", "uploads")
+        }
+        return render(
+            request,
+            "dashboard.html",
+            {
+                "t": totals,
+                "days": days,
+                "chart": chart,
+                "chart_max": max([int(d.active) for d in days] + [1]),
+                "sums": sums,
+                "recent": recent,
+                "storage": storage,
+                "storage_max": max([r["bytes"] for r in storage] + [1]),
+                "storage_total": int(totals.record_bytes + totals.blob_bytes) if totals else 0,
+                "top": top,
+                "top_max": max([int(r.total) for r in top] + [1]),
+                "nav": "dashboard",
+            },
+        )
 
     @app.get("/users", response_class=HTMLResponse)
     async def users(request: Request, q: str = "") -> Response:
@@ -240,7 +303,28 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 "ORDER BY u.created_at DESC LIMIT 500",
                 {"q": q, "like": f"%{q}%"},
             )
-        return render(request, "users.html", {"users": rows, "q": q})
+        items = []
+        for r in rows:
+            items.append(
+                {
+                    "u": r,
+                    "storage": int(r.usage_record_bytes) + int(r.usage_blob_bytes),
+                    "quota": ui.quota_status(r, int(r.n_devices)),
+                }
+            )
+        counts = {
+            "all": len(items),
+            "active": sum(1 for i in items if i["u"].status == "active"),
+            "banned": sum(1 for i in items if i["u"].status == "banned"),
+            "nokeys": sum(1 for i in items if not i["u"].keys_ready),
+            "quota": sum(1 for i in items if i["quota"]["tone"] in ("warning", "danger")),
+        }
+        storage_max = max([i["storage"] for i in items] + [1])
+        return render(
+            request,
+            "users.html",
+            {"users": items, "q": q, "counts": counts, "storage_max": storage_max, "nav": "users"},
+        )
 
     async def _user(c: Any, user_id: str) -> Any:
         try:
@@ -252,7 +336,7 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
     @app.get("/users/new", response_class=HTMLResponse)
     async def new_user_form(request: Request) -> Response:
         require(request)
-        return render(request, "user_new.html", {"error": None})
+        return render(request, "user_new.html", {"error": None, "nav": "users"})
 
     @app.post("/users/new")
     async def new_user(
@@ -266,10 +350,24 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         email = normalize_email(email)
         name = name.strip()
         if not valid_email(email) or not 1 <= len(name) <= 100:
-            return render(request, "user_new.html", {"error": "E-mail ou nome inválido."}, 400)
+            return render(
+                request,
+                "user_new.html",
+                {"error": "E-mail ou nome inválido.", "nav": "users", "form": {"email": email, "name": name}},
+                400,
+            )
         async with app.state.engine.begin() as c:
             if await fetchone(c, "SELECT 1 FROM users WHERE email = :e", {"e": email}):
-                return render(request, "user_new.html", {"error": "Já existe uma conta com esse e-mail."}, 400)
+                return render(
+                    request,
+                    "user_new.html",
+                    {
+                        "error": "Já existe uma conta com esse e-mail.",
+                        "nav": "users",
+                        "form": {"email": email, "name": name},
+                    },
+                    400,
+                )
             uid = await acc.create_user(c, email, name, settings)
             await acc.log_activity(c, "admin_create_user", uid, None, ip_of(request))
             current = await inst.load(c, settings)
@@ -283,7 +381,12 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         async with app.state.engine.connect() as c:
             u = await _user(c, user_id)
             if u is None:
-                return render(request, "message.html", {"title": "Não encontrado", "text": "Usuário inexistente."}, 404)
+                return render(
+                    request,
+                    "message.html",
+                    {"title": "Não encontrado", "text": "Usuário inexistente.", "back": "/users", "nav": "users"},
+                    404,
+                )
             by_type = await fetchall(
                 c,
                 "SELECT type, count(*) AS n, COALESCE(sum(size), 0) AS bytes FROM records "
@@ -306,28 +409,27 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
             daily = await fetchall(
                 c, "SELECT * FROM usage_daily WHERE user_id = :u ORDER BY day DESC LIMIT 30", {"u": u.id}
             )
+        active_devices = sum(1 for d in devices if d.revoked_at is None)
+        storage = [{"type": r.type, "n": r.n, "bytes": int(r.bytes)} for r in by_type]
+        storage.sort(key=lambda r: r["bytes"], reverse=True)
         return render(
             request,
             "user.html",
             {
                 "u": u,
                 "by_type": by_type,
+                "storage": storage,
+                "storage_max": max([r["bytes"] for r in storage] + [int(blobs.bytes) if blobs else 0, 1]),
                 "tomb": tomb,
                 "blobs": blobs,
                 "devices": devices,
+                "active_devices": active_devices,
                 "activity": activity,
                 "daily": daily,
+                "quota": ui.quota_status(u, active_devices),
+                "nav": "users",
             },
         )
-
-    def _quota(v: str) -> int | None:
-        v = v.strip()
-        if v == "":
-            return None
-        n = int(v)
-        if n < 0:
-            raise ValueError
-        return n
 
     @app.post("/users/{user_id}/quotas")
     async def user_quotas(
@@ -335,21 +437,33 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         user_id: str,
         csrf: str = Form(""),
         quota_record_bytes: str = Form(""),
+        quota_record_bytes_unit: str = Form(""),
         quota_records: str = Form(""),
         quota_blob_bytes: str = Form(""),
+        quota_blob_bytes_unit: str = Form(""),
         quota_devices: str = Form(""),
     ) -> Response:
         require_csrf(request, csrf)
         try:
             vals = {
-                "a": _quota(quota_record_bytes),
-                "b": _quota(quota_records),
-                "c": _quota(quota_blob_bytes),
-                "d": _quota(quota_devices),
+                "a": ui.parse_quota(quota_record_bytes, quota_record_bytes_unit),
+                "b": ui.parse_quota(quota_records),
+                "c": ui.parse_quota(quota_blob_bytes, quota_blob_bytes_unit),
+                "d": ui.parse_quota(quota_devices),
             }
+            if (vals["b"] is not None and vals["b"] > 2**31 - 1) or (vals["d"] is not None and vals["d"] > 2**31 - 1):
+                raise ValueError
         except ValueError:
             return render(
-                request, "message.html", {"title": "Erro", "text": "Cotas devem ser inteiros ≥ 0 ou vazias."}, 400
+                request,
+                "message.html",
+                {
+                    "title": "Cota inválida",
+                    "text": "Use números ≥ 0 (decimais com vírgula nos tamanhos) ou deixe vazio para ilimitado.",
+                    "back": f"/users/{user_id}#cotas",
+                    "nav": "users",
+                },
+                400,
             )
         async with app.state.engine.begin() as c:
             u = await _user(c, user_id)
@@ -400,7 +514,32 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 c,
                 {"kind": "devices_revoked", "user_id": str(u.id), "device_ids": [str(i) for i in ids], "chats": chats},
             )
-        return RedirectResponse(f"/users/{u.id}?ok=Dispositivos+desconectados", status_code=303)
+        return RedirectResponse(f"/users/{u.id}?ok=Dispositivos+desconectados#dispositivos", status_code=303)
+
+    @app.post("/users/{user_id}/devices/{device_id}/revoke")
+    async def user_revoke_one(request: Request, user_id: str, device_id: str, csrf: str = Form("")) -> Response:
+        require_csrf(request, csrf)
+        try:
+            did = uuid.UUID(device_id)
+        except ValueError:
+            return PlainTextResponse("não encontrado", status_code=404)
+        async with app.state.engine.begin() as c:
+            u = await _user(c, user_id)
+            if u is None:
+                return PlainTextResponse("não encontrado", status_code=404)
+            ids, chats = await acc.revoke_devices(c, u.id, [did])
+            if ids:
+                await acc.log_activity(c, "device_revoked", u.id, did, ip_of(request), {"by": "admin", "n": 1})
+                await acc.notify(
+                    c,
+                    {
+                        "kind": "devices_revoked",
+                        "user_id": str(u.id),
+                        "device_ids": [str(i) for i in ids],
+                        "chats": chats,
+                    },
+                )
+        return RedirectResponse(f"/users/{u.id}?ok=Dispositivo+desconectado#dispositivos", status_code=303)
 
     @app.post("/users/{user_id}/delete")
     async def user_delete(
@@ -415,7 +554,12 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 return render(
                     request,
                     "message.html",
-                    {"title": "Confirmação errada", "text": "Digite o e-mail exato da conta para apagar."},
+                    {
+                        "title": "Confirmação errada",
+                        "text": "Digite o e-mail exato da conta para apagá-la.",
+                        "back": f"/users/{u.id}#zona-de-perigo",
+                        "nav": "users",
+                    },
                     400,
                 )
             await acc.delete_user(c, u.id)
@@ -425,6 +569,32 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         return RedirectResponse("/users?ok=Conta+apagada", status_code=303)
 
     # ---------------------------------------------------------- convites
+    def _invites_ctx(
+        rows: list[Any], link: str | None, mail_to: str | None = None, mailed: bool = False, ndays: int = 0
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        items = []
+        for i in rows:
+            if i.used_at:
+                status = "used"
+            elif i.revoked_at:
+                status = "revoked"
+            elif i.expires_at < now:
+                status = "expired"
+            else:
+                status = "pending"
+            items.append({"i": i, "status": status})
+        counts = {k: sum(1 for x in items if x["status"] == k) for k in ("pending", "used", "expired", "revoked")}
+        return {
+            "invites": items,
+            "counts": counts,
+            "link": link,
+            "link_email": mail_to,
+            "link_mailed": mailed,
+            "link_days": ndays,
+            "nav": "invites",
+        }
+
     @app.get("/invites", response_class=HTMLResponse)
     async def invites(request: Request) -> Response:
         require(request)
@@ -434,7 +604,7 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 "SELECT i.*, u.email AS used_email FROM invites i LEFT JOIN users u ON u.id = i.used_by "
                 "ORDER BY i.created_at DESC LIMIT 200",
             )
-        return render(request, "invites.html", {"invites": rows, "link": None, "now": datetime.now(UTC)})
+        return render(request, "invites.html", _invites_ctx(rows, None))
 
     @app.post("/invites", response_class=HTMLResponse)
     async def invite_create(
@@ -448,13 +618,33 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         require_csrf(request, csrf)
         mail_to = normalize_email(email) if email.strip() else None
         if mail_to is not None and not valid_email(mail_to):
-            return render(request, "message.html", {"title": "Erro", "text": "E-mail inválido."}, 400)
+            return render(
+                request,
+                "message.html",
+                {
+                    "title": "E-mail inválido",
+                    "text": "Confira o e-mail do convite.",
+                    "back": "/invites",
+                    "nav": "invites",
+                },
+                400,
+            )
         try:
             ndays = int(days) if days.strip() else settings.invite_ttl_days
             if not 1 <= ndays <= 365:
                 raise ValueError
         except ValueError:
-            return render(request, "message.html", {"title": "Erro", "text": "Validade entre 1 e 365 dias."}, 400)
+            return render(
+                request,
+                "message.html",
+                {
+                    "title": "Validade inválida",
+                    "text": "A validade vai de 1 a 365 dias.",
+                    "back": "/invites",
+                    "nav": "invites",
+                },
+                400,
+            )
         async with app.state.engine.begin() as c:
             _iid, token = await acc.create_invite(c, mail_to, note.strip()[:200] or None, ndays)
             await acc.log_activity(c, "invite_created", None, None, ip_of(request), {"bound": bool(mail_to)})
@@ -467,7 +657,7 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         link = f"{settings.public_base_url}/signup?invite={token}"
         if send_email and mail_to:
             await app.state.mailer.send(invite_mail(mail_to, current.instance_name, link, ndays))
-        return render(request, "invites.html", {"invites": rows, "link": link, "now": datetime.now(UTC)})
+        return render(request, "invites.html", _invites_ctx(rows, link, mail_to, bool(send_email and mail_to), ndays))
 
     @app.post("/invites/{invite_id}/revoke")
     async def invite_revoke(request: Request, invite_id: str, csrf: str = Form("")) -> Response:
@@ -486,7 +676,9 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
         require(request)
         async with app.state.engine.connect() as c:
             current = await inst.load(c, settings)
-        return render(request, "settings.html", {"cur": current, "keys": settings.captcha_keys_present})
+        return render(
+            request, "settings.html", {"cur": current, "keys": settings.captcha_keys_present, "nav": "settings"}
+        )
 
     @app.post("/settings")
     async def settings_save(
