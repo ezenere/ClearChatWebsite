@@ -64,7 +64,9 @@ services:
     volumes:
       - blobs:/data/blobs            # apagar conta remove os arquivos
     ports:
-      - "127.0.0.1:${ADMIN_PORT:-8190}:8090"   # SEMPRE 127.0.0.1 — nunca exponha, nunca roteie no Nginx
+      # Padrão 127.0.0.1. ADMIN_BIND_ADDR pode apontar para o IP da rede LOCAL (com ADMIN_ALLOWED_HOSTS);
+      # nunca para a internet, nunca roteie no Nginx.
+      - "${ADMIN_BIND_ADDR:-127.0.0.1}:${ADMIN_PORT:-8190}:8090"
     networks: [internal]
 
   # Self-host sem Nginx próprio: `docker compose --profile edge up -d`

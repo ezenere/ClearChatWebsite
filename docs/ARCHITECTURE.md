@@ -368,8 +368,10 @@ Duas camadas:
 
 ## 6. Painel admin (só do dono, nunca exposto)
 
-- Serviço `admin` separado, publicado **só** em `127.0.0.1:${ADMIN_PORT}` (no compose:
-  `"127.0.0.1:${ADMIN_PORT}:8090"` — fixo, não configurável para outra interface). Fora do Docker,
+- Serviço `admin` separado, publicado por padrão **só** em `127.0.0.1:${ADMIN_PORT}` (no compose:
+  `"${ADMIN_BIND_ADDR:-127.0.0.1}:${ADMIN_PORT}:8090"`). Opcionalmente pode ser liberado na **rede local**:
+  `ADMIN_BIND_ADDR=<IP da LAN do servidor>` + `ADMIN_ALLOWED_HOSTS=<esse IP>` (o admin só aceita esses
+  cabeçalhos `Host`). Nunca na internet. Instância oficial: liberado na LAN em `172.16.1.7:8195`. Fora do Docker,
   `python -m clearchat_admin` recusa escutar fora do loopback (dentro do container usa
   `--host 0.0.0.0 --in-container`, e o isolamento fica com o mapeamento de porta do compose). Acesso:
   `ssh -L 8190:127.0.0.1:8190 ezenere@172.16.1.7` → `http://localhost:8190`.
@@ -377,7 +379,7 @@ Duas camadas:
   não o menciona). Vale também em self-host.
 - Autenticação: `ADMIN_TOKEN` do `.env` (≥ 32 caracteres aleatórios) num formulário de login → cookie de
   sessão assinado (`HttpOnly`, `SameSite=Strict`, expira em 12 h). Defesas extras: aceita só `Host`
-  `localhost:<porta>`/`127.0.0.1:<porta>` (anti DNS rebinding), token CSRF em todo formulário, limite de
+  `localhost:<porta>`/`127.0.0.1:<porta>` e os de `ADMIN_ALLOWED_HOSTS` (anti DNS rebinding), token CSRF em todo formulário, limite de
   5 tentativas de login/min, comparação em tempo constante. Sem token configurado → o admin não sobe
   (no container ele só registra o erro e fica parado, para não reiniciar em loop).
 - Funcionalidades:
@@ -432,7 +434,7 @@ docker compose logs -f api
 
 **O Nginx roda na mesma máquina que o Docker (172.16.1.7)** — confirmado. Por isso todas as portas são
 publicadas só em `127.0.0.1` (`BIND_ADDR=127.0.0.1`, padrão): `API_PORT=8100`, `WEB_PORT=8101`,
-`ADMIN_PORT=8190` (o admin é fixo em 127.0.0.1 no compose, qualquer que seja o `BIND_ADDR`). Postgres sem
+`ADMIN_PORT=8190` (o admin usa `ADMIN_BIND_ADDR`, padrão 127.0.0.1, independente do `BIND_ADDR`). Postgres sem
 porta publicada. Uma conexão do Nginx para `127.0.0.1:8100` chega no container vinda do gateway da bridge
 do compose (o docker-proxy reescreve a origem), por isso a rede tem sub-rede fixa (`COMPOSE_SUBNET`,
 padrão `172.31.250.0/24`) e `TRUSTED_PROXY_CIDRS=127.0.0.1/32,172.31.250.1/32` (padrão) — a api só

@@ -8,6 +8,7 @@ token CSRF em todo formulário; 5 tentativas de login/min por IP. Nunca mostra c
 from __future__ import annotations
 
 import hashlib
+import os
 import hmac
 import secrets
 import uuid
@@ -35,7 +36,10 @@ from clearchat_server.util import client_ip, normalize_email, valid_email
 
 SESSION_COOKIE = "cc_admin"
 SESSION_MAX_AGE = 12 * 3600
-ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
+# Hosts extras aceitos no cabeçalho Host (ex.: o IP da rede local), via ADMIN_ALLOWED_HOSTS no .env.
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"} | {
+    h.strip().lower() for h in os.environ.get("ADMIN_ALLOWED_HOSTS", "").split(",") if h.strip()
+}
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
