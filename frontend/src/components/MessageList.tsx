@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import {
   Brain,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Paperclip,
@@ -9,6 +10,7 @@ import {
   Terminal,
   Wrench
 } from 'lucide-react'
+import type { SiblingInfo } from '../data/branches'
 import type { Entry } from '../data/repo'
 import type { ContentPart, MessagePlain, ToolCall } from '../data/schemas'
 import { formatDateTime } from '../lib/format'
@@ -140,7 +142,81 @@ function Attachments({ names }: { names: string[] }) {
   )
 }
 
-export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
+/** Controles de versão (‹ i/n ›) de um caminho: irmãos de cada mensagem e troca. */
+export interface BranchControls {
+  info: (id: string) => SiblingInfo | null
+  onSelect: (parentKey: string, childId: string) => void
+}
+
+/** Seletor de versão — sempre visível (sinaliza que existem outras versões); ←/→ quando focado. */
+function BranchSwitcher({
+  info,
+  onSelect
+}: {
+  info: SiblingInfo
+  onSelect: BranchControls['onSelect']
+}) {
+  const go = (id: string | null) => {
+    if (id) onSelect(info.parentKey, id)
+  }
+  const btn =
+    'grid size-6 place-items-center rounded-md transition-colors hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-35'
+  return (
+    <div
+      role="group"
+      tabIndex={0}
+      aria-label={`Versão ${info.index + 1} de ${info.count}`}
+      data-testid="branch-switcher"
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          go(info.prevId)
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          go(info.nextId)
+        }
+      }}
+      className="inline-flex items-center gap-0.5 rounded-lg text-[12px] text-subtle select-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none"
+    >
+      <button
+        type="button"
+        className={btn}
+        title="Versão anterior"
+        aria-label="Versão anterior"
+        disabled={!info.prevId}
+        onClick={() => go(info.prevId)}
+      >
+        <ChevronLeft className="size-3.5" />
+      </button>
+      <span className="min-w-[2.25rem] text-center font-mono tabular-nums">
+        {info.index + 1}/{info.count}
+      </span>
+      <button
+        type="button"
+        className={btn}
+        title="Próxima versão"
+        aria-label="Próxima versão"
+        disabled={!info.nextId}
+        onClick={() => go(info.nextId)}
+      >
+        <ChevronRight className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
+/**
+ * `messages` = o caminho a mostrar (já resolvido). Com `branches`, as mensagens cuja mãe tem mais de um
+ * filho ganham o seletor de versão: no balão do usuário, no rodapé da resposta que diverge, e numa
+ * linha acima das outras (erro, sintética…).
+ */
+export function MessageList({
+  messages,
+  branches
+}: {
+  messages: Entry<MessagePlain>[]
+  branches?: BranchControls
+}) {
   // resultados de tools vão dentro do cartão da chamada correspondente
   const results = new Map<string, string>()
   const consumed = new Set<string>()
@@ -160,14 +236,30 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
   return (
     <div className="space-y-5">
       {messages.map(({ plain, change }) => {
-        if (consumed.has(change.id)) return null
+        const sib = branches?.info(change.id)
+        const switcher =
+          branches && sib && sib.count > 1 ? (
+            <BranchSwitcher info={sib} onSelect={branches.onSelect} />
+          ) : null
+        // na bifurcação a chave é a da mãe: trocar de versão reaproveita o elemento (o foco do
+        // seletor continua nele, então ←/→ seguem funcionando)
+        const key = switcher ? `fork:${sib!.parentKey}` : change.id
         const m = plain.message
         const meta = plain.meta ?? {}
+        const withSwitcherAbove = (node: React.ReactNode) =>
+          switcher ? (
+            <div key={key} className="space-y-1.5">
+              <div className="flex">{switcher}</div>
+              {node}
+            </div>
+          ) : (
+            <div key={key}>{node}</div>
+          )
+        if (consumed.has(change.id)) return switcher ? withSwitcherAbove(null) : null
         if (!m) return null
         if (meta.kind === 'compaction')
-          return (
+          return withSwitcherAbove(
             <Collapsible
-              key={change.id}
               icon={<Scissors className="size-3.5" />}
               title="Conversa compactada"
               meta="resumo"
@@ -176,11 +268,8 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
             </Collapsible>
           )
         if (meta.kind === 'error')
-          return (
-            <div
-              key={change.id}
-              className="flex gap-2.5 rounded-xl border border-danger/30 bg-danger/[0.06] px-4 py-3 text-sm"
-            >
+          return withSwitcherAbove(
+            <div className="flex gap-2.5 rounded-xl border border-danger/30 bg-danger/[0.06] px-4 py-3 text-sm">
               <CircleAlert className="mt-0.5 size-4 shrink-0 text-danger" />
               <div className="min-w-0 text-muted">
                 {partsText((m as { content: string | ContentPart[] }).content).text || 'Erro'}
@@ -188,12 +277,8 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
             </div>
           )
         if (m.role === 'system')
-          return (
-            <Collapsible
-              key={change.id}
-              icon={<Terminal className="size-3.5" />}
-              title="Prompt de sistema"
-            >
+          return withSwitcherAbove(
+            <Collapsible icon={<Terminal className="size-3.5" />} title="Prompt de sistema">
               <Pre text={partsText(m.content).text} />
             </Collapsible>
           )
@@ -201,7 +286,7 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
           const { text, attachments } = partsText(m.content)
           const synthetic = meta.synthetic
           return (
-            <div key={change.id} className="flex justify-end">
+            <div key={key} className="flex flex-col items-end gap-1">
               <div
                 className={cx(
                   'max-w-[88%] rounded-2xl rounded-br-md border px-4 py-2.5 text-[15px] leading-relaxed sm:max-w-[78%]',
@@ -214,13 +299,14 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
                 <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p>
                 <Attachments names={attachments} />
               </div>
+              {switcher}
             </div>
           )
         }
         if (m.role === 'assistant') {
           const usage = meta.usage
           return (
-            <div key={change.id} className="space-y-2.5">
+            <div key={key} className="space-y-2.5">
               {m.reasoning && (
                 <Collapsible icon={<Brain className="size-3.5" />} title="Raciocínio">
                   <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap text-muted">
@@ -252,28 +338,30 @@ export function MessageList({ messages }: { messages: Entry<MessagePlain>[] }) {
                   </div>
                 </Collapsible>
               ))}
-              {(meta.model || usage) && (
-                <p className="font-mono text-[11.5px] text-subtle">
-                  {[
-                    meta.model,
-                    usage?.promptTokens != null && `${(usage.promptTokens / 1000).toFixed(1)}k in`,
-                    usage?.completionTokens != null && `${usage.completionTokens} out`,
-                    formatDateTime(plain.createdAt)
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </p>
+              {(switcher || meta.model || usage) && (
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                  {switcher}
+                  {(meta.model || usage) && (
+                    <p className="font-mono text-[11.5px] text-subtle">
+                      {[
+                        meta.model,
+                        usage?.promptTokens != null &&
+                          `${(usage.promptTokens / 1000).toFixed(1)}k in`,
+                        usage?.completionTokens != null && `${usage.completionTokens} out`,
+                        formatDateTime(plain.createdAt)
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           )
         }
         // tool sem chamada correspondente
-        return (
-          <Collapsible
-            key={change.id}
-            icon={<Wrench className="size-3.5" />}
-            title="Resultado de ferramenta"
-          >
+        return withSwitcherAbove(
+          <Collapsible icon={<Wrench className="size-3.5" />} title="Resultado de ferramenta">
             <Pre text={partsText(m.content).text} />
           </Collapsible>
         )

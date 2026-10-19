@@ -1,4 +1,5 @@
 // Conversas: lista (título, atualização, tamanho) e conteúdo (sessões + mensagens) de um chat.
+import { toBranchSel, type BranchNode, type BranchSel } from './branches'
 import { matchesContext, type Repo, type Entry, type BrokenEntry } from './repo'
 import type { ChatPlain, MessagePlain, SessionPlain } from './schemas'
 
@@ -44,8 +45,21 @@ export async function listChats(
 
 export interface SessionView {
   entry: Entry<SessionPlain>
+  /**
+   * TODAS as mensagens da sessão (todas as versões), na ordem da sessão (`seq`, empate por id). A tela
+   * mostra só o caminho ativo (data/branches.ts, §4.3.8).
+   */
   messages: Entry<MessagePlain>[]
+  /** `session.branchSel` validado (§4.3.7); ausente/malformado = `{}`. */
+  branchSel: BranchSel
 }
+
+/** Nó da árvore de versões (§4.3.8) de uma mensagem decifrada. */
+export const messageNode = (e: Entry<MessagePlain>): BranchNode => ({
+  id: e.change.id,
+  seq: e.plain.seq,
+  parentId: e.plain.parentId
+})
 
 export interface ChatView {
   chat: Entry<ChatPlain>
@@ -74,9 +88,18 @@ export async function loadChat(repo: Repo, chatId: string): Promise<ChatView | n
     list.push(m)
     bySession.set(m.plain.sessionId, list)
   }
-  for (const list of bySession.values()) list.sort((a, b) => a.plain.seq - b.plain.seq)
+  for (const list of bySession.values())
+    list.sort(
+      (a, b) =>
+        a.plain.seq - b.plain.seq ||
+        (a.change.id < b.change.id ? -1 : a.change.id > b.change.id ? 1 : 0)
+    )
   const views = sessions.entries
-    .map((entry) => ({ entry, messages: bySession.get(entry.change.id) ?? [] }))
+    .map((entry) => ({
+      entry,
+      messages: bySession.get(entry.change.id) ?? [],
+      branchSel: toBranchSel(entry.plain.branchSel)
+    }))
     .sort((a, b) => a.entry.plain.createdAt - b.entry.plain.createdAt)
   const main =
     views.find((v) => v.entry.change.id === chat.plain.mainSessionId) ??

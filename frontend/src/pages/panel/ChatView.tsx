@@ -1,12 +1,14 @@
-// Conversa (somente leitura): sessão principal + subagentes.
-import { useState } from 'react'
+// Conversa (somente leitura): sessão principal + subagentes. Mostra o caminho ativo da árvore de versões
+// (§4.3.8) escolhido no app (`session.branchSel`); trocar de versão aqui é só na tela (§4.3.7).
+import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { ArrowLeft, Bot, ChevronRight, Info, Trash2 } from 'lucide-react'
+import { ArrowLeft, Bot, ChevronRight, GitBranch, Info, Trash2 } from 'lucide-react'
 import { isApiError } from '../../api'
 import { MessageList } from '../../components/MessageList'
 import { toast } from '../../components/toast'
 import { Alert, Badge, Button, ConfirmDialog, EmptyState, Spinner, cx } from '../../components/ui'
-import { loadChat, type SessionView } from '../../data/chats'
+import { activePath, buildTree, siblingInfo, type BranchSel } from '../../data/branches'
+import { loadChat, messageNode, type SessionView } from '../../data/chats'
 import { errorMessage } from '../../lib/errors'
 import { formatDateTime, relativeTime } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
@@ -16,6 +18,11 @@ import { useSession } from '../../state/session'
 function Subagent({ view }: { view: SessionView }) {
   const [open, setOpen] = useState(false)
   const s = view.entry.plain
+  // subsessões são lineares; o caminho ativo só protege contra versões soltas
+  const path = useMemo(
+    () => activePath(buildTree(view.messages, messageNode), view.branchSel),
+    [view]
+  )
   return (
     <div className="rounded-2xl border border-border bg-surface/60">
       <button
@@ -37,8 +44,8 @@ function Subagent({ view }: { view: SessionView }) {
       </button>
       {open && (
         <div className="border-t border-border px-4 py-4">
-          {view.messages.length ? (
-            <MessageList messages={view.messages} />
+          {path.length ? (
+            <MessageList messages={path} />
           ) : (
             <p className="text-sm text-subtle">Sem mensagens.</p>
           )}
@@ -56,6 +63,22 @@ export default function ChatView() {
   const [confirm, setConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   useLiveRefresh(['chat', 'session', 'message'], () => void reload(true), { scope: chatId })
+
+  // Versões: o padrão é a do app (`branchSel` sincronizado). Trocar aqui só muda a tela — `overrides`
+  // em estado local, descartado quando o `branchSel` sincronizado ou a conversa mudam.
+  const main = data?.main ?? null
+  const syncKey = `${chatId}|${main?.entry.change.id ?? ''}|${JSON.stringify(main?.branchSel ?? {})}`
+  const [local, setLocal] = useState<{ key: string; sel: BranchSel }>({ key: '', sel: {} })
+  const overrides = local.key === syncKey ? local.sel : null
+  const branches = useMemo(() => {
+    if (!main) return null
+    const tree = buildTree(main.messages, messageNode)
+    const appPath = activePath(tree, main.branchSel)
+    const path = overrides ? activePath(tree, { ...main.branchSel, ...overrides }) : appPath
+    const differs =
+      path.length !== appPath.length || path.some((m, i) => m.change.id !== appPath[i].change.id)
+    return { tree, path, differs }
+  }, [main, overrides])
 
   const remove = async () => {
     if (!data) return
@@ -143,8 +166,35 @@ export default function ChatView() {
           {data.broken} registro(s) desta conversa não puderam ser decifrados.
         </Alert>
       )}
-      {data.main?.messages.length ? (
-        <MessageList messages={data.main.messages} />
+      {branches?.differs && (
+        <div
+          role="status"
+          data-testid="branch-banner"
+          className="sticky top-16 z-20 mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-accent/25 bg-surface/95 px-4 py-2.5 text-[13px] shadow-lg backdrop-blur lg:top-3"
+        >
+          <GitBranch className="size-4 shrink-0 text-accent-strong" aria-hidden />
+          <span className="text-muted">Você está vendo outra versão</span>
+          <span className="text-faint" aria-hidden>
+            ·
+          </span>
+          <button
+            type="button"
+            className="font-medium text-accent-strong hover:underline"
+            onClick={() => setLocal({ key: '', sel: {} })}
+          >
+            Voltar à versão do app
+          </button>
+        </div>
+      )}
+      {branches?.path.length ? (
+        <MessageList
+          messages={branches.path}
+          branches={{
+            info: (id) => siblingInfo(branches.tree, id),
+            onSelect: (parentKey, childId) =>
+              setLocal({ key: syncKey, sel: { ...overrides, [parentKey]: childId } })
+          }}
+        />
       ) : (
         <p className="text-sm text-subtle">Esta conversa não tem mensagens.</p>
       )}

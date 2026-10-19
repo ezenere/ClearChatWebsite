@@ -48,6 +48,10 @@ interface Msg {
   tool_calls?: { id: string; name: string; args: Record<string, unknown> }[]
   tool_call_id?: string
   model?: string
+  /** Árvore de versões (§4.3.8): rótulo local desta mensagem… */
+  key?: string
+  /** …e o rótulo da mãe (`null` = raiz; ausente = a anterior da lista). */
+  parent?: string | null
 }
 
 async function chatItems(
@@ -60,10 +64,22 @@ async function chatItems(
     providerId: string
     messages: Msg[]
     sub?: { title: string; task: string; parentToolCallId: string; messages: Msg[] }
+    /**
+     * Conversa com versões (app ≥ 0.7): grava `parentId` em todas as mensagens e o `branchSel` da
+     * sessão principal (rótulos `key` → ids). Sem isso, registros como os de um cliente antigo.
+     */
+    branchSel?: Record<string, string | null>
   }
 ): Promise<PushItem[]> {
   const chatId = crypto.randomUUID()
   const mainId = crypto.randomUUID()
+  const tree = opts.branchSel !== undefined
+  const mainIds = opts.messages.map(() => crypto.randomUUID())
+  const idOf = (key: string) => {
+    const i = opts.messages.findIndex((m) => m.key === key)
+    if (i < 0) throw new Error(`seed: rótulo desconhecido ${key}`)
+    return mainIds[i]
+  }
   const out: PushItem[] = []
   const chat: ChatPlain = {
     sv: 1,
@@ -94,8 +110,24 @@ async function chatItems(
       memory: null,
       ...extra
     } satisfies SessionPlain)
-  out.push(await session(mainId, 'Principal', 0, {}))
-  const pushMsgs = async (sessionId: string, msgs: Msg[]) => {
+  out.push(
+    await session(
+      mainId,
+      'Principal',
+      0,
+      tree
+        ? {
+            branchSel: Object.fromEntries(
+              Object.entries(opts.branchSel!).map(([k, v]) => [
+                k === 'root' ? k : idOf(k),
+                v === null ? null : idOf(v)
+              ])
+            )
+          }
+        : {}
+    )
+  )
+  const pushMsgs = async (sessionId: string, msgs: Msg[], ids?: string[]) => {
     let t = opts.at - msgs.length * 60_000
     for (const [i, m] of msgs.entries()) {
       t += 60_000
@@ -130,12 +162,17 @@ async function chatItems(
                 usage: { promptTokens: 1800 + i * 300, completionTokens: 240 }
               }
             : {},
-        createdAt: t
+        createdAt: t,
+        ...(ids
+          ? {
+              parentId: m.parent === undefined ? (ids[i - 1] ?? null) : m.parent && idOf(m.parent)
+            }
+          : {})
       }
-      out.push(await item(sk, userId, 'message', crypto.randomUUID(), chatId, plain))
+      out.push(await item(sk, userId, 'message', ids?.[i] ?? crypto.randomUUID(), chatId, plain))
     }
   }
-  await pushMsgs(mainId, opts.messages)
+  await pushMsgs(mainId, opts.messages, tree ? mainIds : undefined)
   if (opts.sub) {
     const subId = crypto.randomUUID()
     out.push(
@@ -318,6 +355,50 @@ export async function seedDemo(server: MockServer): Promise<void> {
           }
         ]
       }
+    }),
+    // versões (app 0.7): a 2ª pergunta foi editada e a resposta da versão nova foi regenerada; no app
+    // está escolhida a 1ª resposta (não a mais nova)
+    await chatItems(sk, userId, {
+      title: 'Roteiro de 3 dias em Lisboa',
+      at: now - 50 * 60_000,
+      model: 'anthropic/claude-sonnet-4.5',
+      providerId: orId,
+      branchSel: { u2b: 'a2b' },
+      messages: [
+        { key: 'u1', role: 'user', content: 'Monta um roteiro de 3 dias em Lisboa, sem pressa.' },
+        {
+          key: 'a1',
+          role: 'assistant',
+          content:
+            '**Dia 1** — Baixa, Chiado e pôr do sol no Miradouro de Santa Catarina.\n\n**Dia 2** — Belém: mosteiro, torre e pastéis.\n\n**Dia 3** — Alfama de manhã e LX Factory à tarde.'
+        },
+        { key: 'u2', role: 'user', content: 'Troca o dia 2 por um bate-volta para Sintra.' },
+        {
+          key: 'a2',
+          role: 'assistant',
+          content:
+            'Feito: **Dia 2 em Sintra** — Palácio da Pena cedo, Quinta da Regaleira depois do almoço. Belém fica para outra viagem.'
+        },
+        {
+          key: 'u2b',
+          parent: 'a1',
+          role: 'user',
+          content: 'Troca o dia 3 por um bate-volta para Sintra.'
+        },
+        {
+          key: 'a2b',
+          role: 'assistant',
+          content:
+            'Feito: **Dia 3 em Sintra** — trem do Rossio às 8h, Palácio da Pena e Quinta da Regaleira. Alfama passa para a manhã do dia 1.'
+        },
+        {
+          key: 'a2c',
+          parent: 'u2b',
+          role: 'assistant',
+          content:
+            'Combinado: **Dia 3 em Sintra e Cascais** — Pena de manhã, almoço em Sintra e fim de tarde na praia em Cascais.'
+        }
+      ]
     }),
     await chatItems(sk, userId, {
       title: 'Ideias de nomes para o app',

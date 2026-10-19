@@ -76,6 +76,8 @@ export interface SessionPlain {
   task: string | null
   status: string
   createdAt: number
+  /** Desde 1.2.0 (§4.3.7): versão escolhida em cada bifurcação; ausente = `{}`. */
+  branchSel?: Record<string, string | null>
   [k: string]: unknown
 }
 
@@ -113,5 +115,7 @@ export interface MessagePlain {
   message: ApiMessage
   meta: MessageMeta
   createdAt: number
+  /** Desde 1.2.0 (§4.3.8): mensagem anterior no mesmo ramo; `null` = raiz; ausente = derivada. */
+  parentId?: string | null
   [k: string]: unknown
 }

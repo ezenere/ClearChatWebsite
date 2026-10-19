@@ -4,7 +4,8 @@ import type { Change, PushRequest } from '../api/types'
 import { createKeyMaterial, deriveSubkeys, openRecord, sealRecord, ARGON2_DEFAULT } from '../crypto'
 import { emptyDb, MockServer } from '../mock/server'
 import { createMockFetch } from '../mock/transport'
-import { listChats, loadChat } from './chats'
+import { activePath, buildTree, siblingInfo, type BranchSel } from './branches'
+import { listChats, loadChat, messageNode } from './chats'
 import { Repo } from './repo'
 import type { ProviderPlain } from './schemas'
 
@@ -156,6 +157,82 @@ describe('Repo (envelopes de registro de ponta a ponta)', () => {
     const view = await loadChat(repo, 'c')
     expect(view!.main!.messages.map((m) => m.plain.seq)).toEqual([1, 2])
     expect(await loadChat(repo, 'nao-existe')).toBeNull()
+  })
+})
+
+describe('loadChat: versões das mensagens (§4.3.7/§4.3.8)', () => {
+  it('devolve todas as versões + branchSel; o caminho ativo segue a seleção do app', async () => {
+    const { server, repo, sk, userId } = await setup()
+    const seal = (type: string, id: string, p: Record<string, unknown>) =>
+      sealRecord(sk.record, userId, { type, id, scope: 'c', rev: 1 }, p).then((env) => ({
+        type,
+        id,
+        scope: 'c',
+        base_rev: 0,
+        rev: 1,
+        deleted: false,
+        env,
+        blobs: []
+      }))
+    const msg = (id: string, sessionId: string, seq: number, extra: Record<string, unknown> = {}) =>
+      seal('message', id, {
+        sv: 1,
+        sessionId,
+        seq,
+        message: { role: seq % 2 ? 'user' : 'assistant', content: id },
+        meta: {},
+        createdAt: seq,
+        ...extra
+      })
+    const session = (id: string, extra: Record<string, unknown>) =>
+      seal('session', id, {
+        sv: 1,
+        chatId: 'c',
+        parentSessionId: null,
+        depth: 0,
+        createdAt: 1,
+        title: id,
+        ...extra
+      })
+    server.remotePush(userId, [
+      await seal('chat', 'c', {
+        sv: 1,
+        title: 'Versões',
+        config: {},
+        mainSessionId: 's',
+        createdAt: 1,
+        updatedAt: 9
+      }),
+      // seleção do app: a 1ª versão da pergunta editada; valores inválidos são descartados
+      await session('s', { branchSel: { a1: 'u2', lixo: 42 } }),
+      // subagente gravado por um cliente < 1.2.0 (sem branchSel nem parentId)
+      await session('sub', { parentSessionId: 's', depth: 1, createdAt: 2 }),
+      await msg('u1', 's', 1), // legado: mãe derivada (raiz)
+      await msg('a1', 's', 2), // legado: mãe derivada (u1)
+      await msg('u2', 's', 3, { parentId: 'a1' }),
+      await msg('a2', 's', 4, { parentId: 'u2' }),
+      await msg('u2b', 's', 5, { parentId: 'a1' }),
+      await msg('a2b', 's', 6, { parentId: 'u2b' }),
+      // mãe de outra sessão não vale: derivada como a anterior por seq DESTA sessão
+      await msg('x1', 'sub', 1),
+      await msg('x2', 'sub', 2, { parentId: 'u1' })
+    ])
+    const view = await loadChat(repo, 'c')
+    const main = view!.main!
+    expect(main.messages.map((m) => m.change.id)).toEqual(['u1', 'a1', 'u2', 'a2', 'u2b', 'a2b'])
+    expect(main.branchSel).toEqual({ a1: 'u2' })
+    const tree = buildTree(main.messages, messageNode)
+    const ids = (sel: BranchSel) => activePath(tree, sel).map((m) => m.change.id)
+    expect(ids(main.branchSel)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    expect(ids({})).toEqual(['u1', 'a1', 'u2b', 'a2b'])
+    expect(siblingInfo(tree, 'u2')).toMatchObject({ index: 0, count: 2, nextId: 'u2b' })
+
+    const sub = view!.subagents[0]
+    expect(sub.branchSel).toEqual({})
+    const subTree = buildTree(sub.messages, messageNode)
+    expect(subTree.parentOf.get('x2')).toBe('x1')
+    expect(activePath(subTree, sub.branchSel).map((m) => m.change.id)).toEqual(['x1', 'x2'])
+    expect(view!.broken).toBe(0)
   })
 })
 

@@ -33,8 +33,113 @@ test('ver conversa decifrada (markdown, raciocínio, ferramentas, subagente) e a
   expect(left).toBe(0)
 })
 
+test('versões: mostra a do app, ‹ › troca só na tela e "Voltar à versão do app" restaura', async ({
+  page
+}) => {
+  await page.getByRole('link', { name: /Roteiro de 3 dias em Lisboa/ }).click()
+  await expect(page.getByRole('heading', { name: 'Roteiro de 3 dias em Lisboa' })).toBeVisible()
+  const banner = page.getByText('Você está vendo outra versão')
+  // versão escolhida no app: a 2ª pergunta (editada) com a 1ª das duas respostas
+  await expect(page.getByText('Troca o dia 3 por um bate-volta para Sintra.')).toBeVisible()
+  await expect(page.getByText(/trem do Rossio às 8h/)).toBeVisible()
+  await expect(page.getByText('Troca o dia 2 por um bate-volta para Sintra.')).toHaveCount(0)
+  await expect(page.getByText(/Sintra e Cascais/)).toHaveCount(0)
+  const switchers = page.getByTestId('branch-switcher')
+  await expect(switchers).toHaveCount(2)
+  // seletores na ordem da tela: pergunta editada (2 versões) e resposta regenerada (2 versões)
+  const question = switchers.first()
+  const answer = switchers.last()
+  await expect(question).toHaveAccessibleName('Versão 2 de 2')
+  await expect(answer).toHaveAccessibleName('Versão 1 de 2')
+  await expect(banner).toHaveCount(0)
+
+  // próxima resposta (só na tela)
+  await answer.getByRole('button', { name: 'Próxima versão' }).click()
+  await expect(page.getByText(/Sintra e Cascais/)).toBeVisible()
+  await expect(page.getByText(/trem do Rossio às 8h/)).toHaveCount(0)
+  await expect(answer).toHaveAccessibleName('Versão 2 de 2')
+  await expect(banner).toBeVisible()
+
+  // pergunta anterior: outra resposta, sem seletor nela (só uma versão)
+  await question.getByRole('button', { name: 'Versão anterior' }).click()
+  await expect(page.getByText('Troca o dia 2 por um bate-volta para Sintra.')).toBeVisible()
+  await expect(page.getByText(/Dia 2 em Sintra/)).toBeVisible()
+  await expect(switchers).toHaveCount(1)
+  await expect(question).toHaveAccessibleName('Versão 1 de 2')
+  // teclado: → no seletor focado volta para a pergunta editada
+  await question.focus()
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByText('Troca o dia 3 por um bate-volta para Sintra.')).toBeVisible()
+  await expect(page.getByText(/Sintra e Cascais/)).toBeVisible() // a resposta escolhida aqui ficou
+
+  await page.getByRole('button', { name: 'Voltar à versão do app' }).click()
+  await expect(banner).toHaveCount(0)
+  await expect(page.getByText(/trem do Rossio às 8h/)).toBeVisible()
+  await expect(page.getByText(/Sintra e Cascais/)).toHaveCount(0)
+
+  // nada foi gravado: o registro session continua com a seleção do app (rev 1)
+  const revs = await page.evaluate(() => {
+    const d = window.__mock!.server.db
+    const u = d.users[d.demo!.user_id]
+    return Object.values(u.records)
+      .filter((r) => r.type === 'session' || r.type === 'message')
+      .map((r) => r.rev)
+  })
+  expect(revs.every((r) => r === 1)).toBe(true)
+})
+
+test('versões ao vivo: o app troca de versão → a escolha local é descartada', async ({ page }) => {
+  await page.getByRole('link', { name: /Roteiro de 3 dias em Lisboa/ }).click()
+  const banner = page.getByText('Você está vendo outra versão')
+  await page
+    .getByTestId('branch-switcher')
+    .first()
+    .getByRole('button', { name: 'Versão anterior' })
+    .click()
+  await expect(page.getByText(/Dia 2 em Sintra/)).toBeVisible()
+  await expect(banner).toBeVisible()
+
+  // o host grava uma nova revisão do session com branchSel {} (volta para a resposta mais nova)
+  await page.evaluate(async () => {
+    const { deriveSubkeys, fromHex, openRecord, sealRecord } = (await import(
+      /* @vite-ignore */ '/src/crypto/index.ts' as string
+    )) as typeof import('../src/crypto')
+    const m = window.__mock!
+    const d = m.server.db
+    const u = d.users[d.demo!.user_id]
+    const sk = await deriveSubkeys(fromHex(d.demo!.dek_hex))
+    for (const x of Object.values(u.records)) {
+      if (x.type !== 'session' || x.deleted) continue
+      const p = await openRecord(sk.record, u.id, x, x.env!)
+      if (!p.branchSel || !Object.keys(p.branchSel as object).length) continue
+      const env = await sealRecord(
+        sk.record,
+        u.id,
+        { ...x, rev: x.rev + 1 },
+        { ...p, branchSel: {} }
+      )
+      m.server.remotePush(u.id, [
+        {
+          type: 'session',
+          id: x.id,
+          scope: x.scope,
+          base_rev: x.rev,
+          rev: x.rev + 1,
+          deleted: false,
+          env,
+          blobs: []
+        }
+      ])
+    }
+  })
+  await expect(banner).toHaveCount(0)
+  await expect(page.getByText(/Sintra e Cascais/)).toBeVisible()
+  await expect(page.getByText(/Dia 2 em Sintra/)).toHaveCount(0)
+  await expect(page.getByTestId('branch-switcher').last()).toHaveAccessibleName('Versão 2 de 2')
+})
+
 test('lista de conversas: filtro e atualização ao vivo pelo WebSocket', async ({ page }) => {
-  await expect(page.getByText(/4 conversas/)).toBeVisible()
+  await expect(page.getByText(/5 conversas/)).toBeVisible()
   await page.getByLabel('Filtrar conversas').fill('rsync')
   await expect(page.getByRole('link', { name: /Script de backup/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /Ideias de nomes/ })).toHaveCount(0)
@@ -48,7 +153,7 @@ test('lista de conversas: filtro e atualização ao vivo pelo WebSocket', async 
     const id = Object.values(u.records).find((r) => r.type === 'chat' && !r.deleted)!.id
     window.__mock!.remoteDeleteChat(id)
   })
-  await expect(page.getByText(/4 conversas/)).toBeVisible()
+  await expect(page.getByText(/5 conversas/)).toBeVisible()
 })
 
 test('provedores: adicionar, editar (preservando campos desconhecidos) e apagar', async ({
