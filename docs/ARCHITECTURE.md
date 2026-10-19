@@ -341,22 +341,13 @@ esquema (com nomes explícitos nos índices).
   e-mails só como HMAC. Exceção consciente: `MAIL_BACKEND=console` (desenvolvimento) escreve o e-mail
   inteiro, com o código, no log.
 
-### 4.1 Lacunas do contrato — interpretação adotada (a levar ao SYNC_PROTOCOL.md nos dois repositórios)
+### 4.1 Lacunas do contrato
 
-- `GET /records` → `{ records, next, has_more, head }` (como o feed); `GET /chat-states` →
-  `{ chat_states, state_cursor }`; `POST /chats/{id}/divergence/resolve` → `{ state }` (+ `results`,
-  `head`, `chat_heads` em `keep: 'local'` com itens); `PUT /keys/*` e `POST /keys/setup` → `KeysResponse`;
-  `POST /keys/reset` → `204`; `PUT /blobs` → `{ blob_id, created }`.
-- `stream.event` é aceito do host com `epoch` atual mesmo **sem** janela aberta (o snapshot pedido por
-  `stream.subscribe` chega antes do `host.begin` no diagrama §16.5; §11 fala em "janela aberta").
-- Push de conteúdo pelo host com a janela aberta e **sem** `host_epochs` é aceito (modo A); `host_epochs`
-  com host/epoch certos e janela fechada vira replay (modo B). Janela do host aberta mas WS do host
-  caído (tolerância) → `chat_busy`.
-- `host.release` sem troca pendente → o chat fica sem host (`epoch+1`).
-- Após `keys.reset` as conexões fecham com `4403` (como §10.5), mas os dispositivos **não** são revogados:
-  o cliente pode reconectar com o mesmo token e refazer o setup.
-- Fechamento por ociosidade (30 s sem frames) usa `1000`.
-- Refresh do site: corpo `{}` e o refresh vem do cookie `cc_refresh` (`Secure` só com `https`).
+As interpretações adotadas durante a implementação (corpos de resposta de `/records`, `/chat-states`,
+`divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
+tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
+sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
+`docs/SYNC_PROTOCOL.md` (v1.0.0, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 
@@ -414,13 +405,16 @@ Duas camadas:
   de busca (editar registros `provider` e `setting webSearchApiKeys`), trocar senha, recuperação, nova
   chave de recuperação, dispositivos (listar/renomear/revogar), apagar conta, "zerar criptografia".
 - Cripto: hash-wasm 4.12.0 (Argon2id) em Web Worker + WebCrypto; testes rodam os vetores de
-  `docs/test-vectors/`. CSP: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'
-  https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self'
-  wss: ws:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none';
-  base-uri 'none'; frame-ancestors 'none'`.
-- Base path em tempo de execução: o build usa caminhos relativos (`base: './'`); no start, o container
-  gera `config.js` com `window.__CLEARCHAT__ = { baseUrl: PUBLIC_BASE_URL }` e o router usa o caminho
-  dele como `basename`.
+  `docs/test-vectors/`. CSP (servida pelo nginx do container, `frontend/docker/40-clearchat-site.sh`):
+  `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com;
+  frame-src https://challenges.cloudflare.com; connect-src 'self' wss: ws: https://api.github.com;
+  img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; worker-src 'self'; object-src 'none';
+  base-uri 'self'; frame-ancestors 'none'; form-action 'self'`. `https://api.github.com`: a landing
+  consulta a última release do app. `base-uri 'self'` (e não `'none'`): o `index.html` usa `<base href>`.
+- Base path em tempo de execução: o build usa caminhos relativos; no start, o container (script em
+  `frontend/docker/`) gera `config.js` com `window.__CLEARCHAT__ = { baseUrl: PUBLIC_BASE_URL }`,
+  **reescreve o `<base href="/">` do `index.html` para `<base href="<caminho>/">`** e monta o server block
+  do nginx para servir sob o caminho; o router usa esse caminho como `basename`.
 - O site é um "dispositivo" (`client: web`, `can_host: false`); PODE usar o WebSocket para assistir ao
   vivo e mandar comandos remotos (fora do escopo mínimo).
 

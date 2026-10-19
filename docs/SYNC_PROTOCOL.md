@@ -264,6 +264,8 @@ deduplica. Ao baixar, o cliente DEVE conferir `SHA-256(plaintext)` contra o sha2
 
 - Registro `skill`: `id = "sk_" + primeiros 32 hex de HMAC-SHA256(K_record_id, UTF-8("skill|" + name))`
   (`name` = nome efetivo da skill). Mesmo nome ⇒ mesmo id em todos os dispositivos (deduplicação natural).
+  Comportamento conhecido: **renomear uma skill gera outro registro** (id novo); o antigo continua até ser
+  removido da nuvem.
 
 ### 3.13 Guarda da DEK nos clientes
 
@@ -411,7 +413,8 @@ o dispositivo que fez a troca envia a nova revisão (regra determinística: todo
   createdAt: number, updatedAt: number,
   hostCwd?: { deviceId: string, path: string } | null }   // informativo: raiz do chat NO HOST (§8.9)
 ```
-`config.cwd` é local do dispositivo (§4.4). `hostCwd` é escrito pelo host (quando vira host ou muda a
+`updatedAt` muda a cada mensagem (ordem da sidebar), então o host reenvia o registro `chat` durante o
+turno (aceito: LWW por campo, coalescido). `config.cwd` é local do dispositivo (§4.4). `hostCwd` é escrito pelo host (quando vira host ou muda a
 raiz) só para exibir avisos ("diretório raiz /home/x/proj no PC") — nunca é aplicado como raiz local.
 
 #### 4.3.7 `session`
@@ -526,14 +529,19 @@ navegador em `<base>/signup?from=app`.
   TTL 60 dias deslizante, **rotacionado a cada uso**; reutilizar um refresh antigo revoga o dispositivo
   (detecção de roubo). Servidor guarda só `SHA-256(token)`.
 - Apps: tokens no corpo JSON; `Authorization: Bearer cca_…`. Desktop guarda o refresh com `safeStorage`.
-- Site (`client: "web"`): o refresh vai num cookie `cc_refresh` `HttpOnly; Secure; SameSite=Strict;
-  Path=<caminho de base>/api/v1/auth`; o access fica em memória. Sem CORS (mesma origem; apps nativos não precisam).
+- Site (`client: "web"`): o refresh vai num cookie `cc_refresh` `HttpOnly; SameSite=Strict;
+  Path=<caminho de base>/api/v1/auth` (+ `Secure` quando `<base>` é `https`); o access fica em memória.
+  `POST /auth/refresh` do site manda corpo `{}` e o servidor lê o cookie. Sem CORS (mesma origem; apps nativos não precisam).
 - Cada login cria um **dispositivo** (`devices`): `name` (ex.: "PC de casa" — editável), `platform`
   (`linux|windows|macos|android|ios|web`), `client` (`desktop|mobile|web`), `app_version`,
   `can_host` (desktop: true; web: false; mobile: true só para chats sem ferramentas locais, §8.9).
   `client` aceita ainda o valor **reservado** `gateway` (§21) — servidores v1 recusam login com ele.
-- Revogar (`DELETE /devices/{id}`) apaga os tokens, fecha o WebSocket (`4403 device_revoked`) e retira o
-  dispositivo de host dos chats dele (§8). Login novo no mesmo aparelho = dispositivo novo.
+- Revogar (`DELETE /devices/{id}`) apaga os tokens (access e refresh), fecha o WebSocket
+  (`4403`, motivo `device_revoked`) e retira o dispositivo de host dos chats dele (§8). Como os tokens são
+  apagados, as chamadas REST seguintes desse dispositivo recebem **`401 unauthorized`** (não
+  `403 device_revoked`) e o refresh também falha com `401 unauthorized` → o cliente trata como sessão
+  encerrada (apaga credenciais e DEK, volta ao login). `403 device_revoked` só aparece se o token ainda
+  existir com o dispositivo revogado (corrida). Login novo no mesmo aparelho = dispositivo novo.
 
 ### 5.5 Troca de senha e recuperação
 
@@ -596,7 +604,7 @@ Clientes chamam antes de login (validação do servidor escolhido) e a cada cone
 | `POST /auth/signup/verify` | `{ email, code, device }` | `201 AuthResult` |
 | `POST /auth/code/request` | `{ email, turnstile_token? }` | `202 { ok: true }` |
 | `POST /auth/code/verify` | `{ email, code, device }` | `200 AuthResult` |
-| `POST /auth/refresh` | `{ refresh_token }` (apps) ou cookie (web) | `200 Tokens` |
+| `POST /auth/refresh` | `{ refresh_token }` (apps); site: corpo `{}` + cookie `cc_refresh` | `200 Tokens` |
 | `POST /auth/logout` | — | `204` (revoga o dispositivo atual) |
 | `POST /auth/reauth/request` | `{ purpose: 'delete_account' \| 'reset_keys' }` (autenticado) | `202` (código no e-mail da conta) |
 
@@ -631,10 +639,10 @@ KeysResponse = {
 | Método e caminho | Corpo | Notas |
 |---|---|---|
 | `GET /keys` | — | `200 KeysResponse` ou `409 keys_not_ready` |
-| `POST /keys/setup` | `{ password: {kdf, salt, wrap}, recovery: {kdf, salt, wrap}, verifier }` | só com `keys_ready=false`, senão `409 keys_already_set` |
-| `PUT /keys/password` | `{ key_proof, password: {kdf, salt, wrap} }` | `403 key_proof_invalid`; broadcast `keys.changed` |
+| `POST /keys/setup` | `{ password: {kdf, salt, wrap}, recovery: {kdf, salt, wrap}, verifier }` | `200 KeysResponse`; só com `keys_ready=false`, senão `409 keys_already_set` |
+| `PUT /keys/password` | `{ key_proof, password: {kdf, salt, wrap} }` | `200 KeysResponse` (`keys_rev` novo); `403 key_proof_invalid`; broadcast `keys.changed` |
 | `PUT /keys/recovery` | `{ key_proof, recovery: {kdf, salt, wrap} }` | idem |
-| `POST /keys/reset` | `{ code }` | apaga dados; broadcast `keys.reset` |
+| `POST /keys/reset` | `{ code }` | `204`; apaga dados; broadcast `keys.reset` (§10.2) |
 
 O servidor valida formato (salt 16 bytes, `n` 12, `c` 48, `kdf` dentro dos limites §3.4).
 
@@ -652,17 +660,17 @@ O servidor valida formato (salt 16 bytes, `n` 12, `c` 48, `kdf` dentro dos limit
 |---|---|
 | `GET /sync/changes?since=<seq>&limit=<n>&payload=1` | feed de mudanças (§7.3) |
 | `POST /sync/push` | push atômico (§7.4) |
-| `GET /records?type=<t>&scope=<id>&after=<seq>&limit=<n>&payload=1` | estado atual (sem tombstones), paginado por `seq` — usado pelo site, mobile e na resolução de divergência |
+| `GET /records?type=<t>&scope=<id>&after=<seq>&limit=<n>&payload=1` | estado atual (sem tombstones), paginado por `seq` → `{ records: [Change], next, has_more, head }` (mesma paginação do feed: repetir com `after=next`) — usado pelo site, mobile, resync e resolução de divergência |
 | `POST /records/fetch` | `{ items: [{ type, id }] }` (≤ 500) → `{ records: [Change] }` (payload de registros omitidos) |
-| `GET /chat-states?since=<ssq>` | estados de host/divergência dos chats (§8.2), incremental por `ssq` |
-| `POST /chats/{chat_id}/divergence/resolve` | resolução de divergência (§9) |
+| `GET /chat-states?since=<ssq>` | estados de host/divergência dos chats (§8.2), incremental por `ssq` → `{ chat_states: [ChatState], state_cursor }` |
+| `POST /chats/{chat_id}/divergence/resolve` | resolução de divergência (§9) → `{ state: ChatState }` (+ `results`, `head`, `chat_heads` como no push, em `keep: 'local'` com itens) |
 
 ### 6.8 Blobs
 
 | Método e caminho | Descrição |
 |---|---|
 | `POST /blobs/check` | `{ ids: [blob_id] }` (≤ 1000) → `{ present: [...], missing: [...] }` |
-| `PUT /blobs/{blob_id}` | corpo `application/octet-stream` (o blob CCB1), cabeçalho `X-Content-SHA256: <hex do ciphertext>` → `201` (novo) ou `200` (já existia) |
+| `PUT /blobs/{blob_id}` | corpo `application/octet-stream` (o blob CCB1), cabeçalho `X-Content-SHA256: <hex do ciphertext>` → `201 { blob_id, created: true }` (novo) ou `200 { blob_id, created: false }` (já existia) |
 | `GET /blobs/{blob_id}` | `200 application/octet-stream` + `X-Content-SHA256`; `404 not_found` |
 
 ---
@@ -711,22 +719,25 @@ e normalizar ao fim do lote; o que ainda estiver negativo espera a próxima revi
   items: [{ type, id, scope: string | null, base_rev: number /* 0 = novo */, rev: number /* = base_rev+1 */,
             deleted: boolean, env?: Envelope, blobs: string[] }],
   chat_bases?: { [chat_id]: number },      // obrigatório para todo chat com conteúdo (session/message) no lote
-  host_epochs?: { [chat_id]: number } }    // presente quando o push é feito dentro de uma janela de host (§8)
+  host_epochs?: { [chat_id]: number } }    // opcional; enviado pelo host dentro da janela (§8.4)
 ```
-Regras (servidor, numa transação; **lote atômico**: tudo ou nada):
+Regras (servidor, numa transação; **lote atômico**: tudo ou nada), **nesta ordem**:
 1. Validação: tipos conhecidos, `scope` coerente com o tipo, `rev == base_rev + 1`, tombstone sem `env`
    e sem `blobs`, envelope bem formado, ≤ 500 itens.
 2. **Idempotência**: se `(user, push_id)` já existe em `push_receipts`, devolve a resposta guardada (7 dias).
 3. **Blobs**: todo id em `blobs` precisa existir em `blobs` do usuário → senão `409 blob_missing`
    (`details.missing`). O cliente sobe os blobs **antes** do registro.
-4. **Revisão**: `current.rev == base_rev` (registro inexistente = 0; tombstone conta com a rev dele).
-   Senão conflito `rev_mismatch` com o `Change` atual.
-5. **Tombstone atual**: escrever num registro apagado só é permitido com `base_rev == rev do tombstone`
-   (o cliente viu a exclusão e quer recriar de propósito); senão conflito `gone`.
-6. **Escopo**: `session`/`message` exigem o `chat` do escopo existente e não apagado (ou criado no mesmo
+4. **Escopo**: `session`/`message` exigem o `chat` do escopo existente e não apagado (ou criado no mesmo
    lote); `memory` exige a coleção. Apagado → `scope_deleted`; inexistente → `scope_missing`.
-7. **Conteúdo do chat**: regras de host/replay da §8.4 (`not_host`, `chat_busy`, `chat_diverged`,
-   `divergence_discarded`, `stale_base`).
+5. **Conteúdo do chat**: regras de host/replay da §8.4 (`chat_diverged`, `divergence_discarded`,
+   `stale_base`, `not_host`, `chat_busy`). Vêm **antes** das de revisão para que um replay com base velha
+   marque a divergência em vez de devolver `rev_mismatch`; a divergência é gravada numa transação
+   própria (o lote em si é recusado). Exclusão de `chat` com janela aberta → `chat_busy`; escrita no
+   `chat` divergente → `chat_diverged`.
+6. **Revisão**: `current.rev == base_rev` (registro inexistente = 0; tombstone conta com a rev dele).
+   Senão conflito `rev_mismatch` com o `Change` atual.
+7. **Tombstone atual**: escrever num registro apagado só é permitido com `base_rev == rev do tombstone`
+   (o cliente viu a exclusão e quer recriar de propósito); senão conflito `gone`.
 8. **Cotas** (§7.10) → `413 quota_exceeded`.
 9. Aplica: novo `seq` por item, atualiza `head` dos chats afetados, `record_blobs`, uso; grava o recibo;
    transmite `sync.changes` a todas as conexões do usuário (inclusive a que enviou).
@@ -789,7 +800,8 @@ Tombstones com mais de `TOMBSTONE_RETENTION_DAYS` (180) são removidos; `users.t
 
 ### 7.9 Resync completo
 
-Quando `cursor_expired`, troca de conta ou estado local corrompido: o cliente baixa o estado atual
+Quando `cursor_expired`, troca de conta ou estado local corrompido. Note que, após um `keys/reset`, até um
+cliente novo recebe `410` em `since=0` (o piso subiu): começar sempre tratando `410` como resync. Então: o cliente baixa o estado atual
 inteiro (`GET /records` paginado por tipo, depois `GET /chat-states`), e reconcilia: registro local já
 sincronizado antes (tem `rev` > 0) e ausente online → apagar localmente; local nunca enviado → outbox;
 presente nos dois → regra de conflito do tipo. Define `cursor = head` da primeira página.
@@ -894,6 +906,14 @@ Transições (normativas):
 3. **Queda do host** (fechamento ou 30 s sem tráfego): `grace` por `HOST_DROP_GRACE_S` (10 s); se
    reconectar e mandar `hello.active_windows` com o mesmo `epoch`, a janela continua. Expirou: janela
    fechada, `host.status = offline`, broadcast `event: host_dropped`. O host **não** muda.
+   **Eventos** (o que o servidor transmite em `chat.state`):
+   - entrada em tolerância: `chat.state` com `host.status = 'grace'` **sem** `event` (a UI PODE mostrar
+     "reconectando…", mas não avisa queda);
+   - fim da tolerância sem volta: `event: host_dropped` (→ "O dispositivo remoto (<nome>) caiu");
+   - host reconecta (vindo de `grace` **ou** de `offline`): `event: host_back`. Se o host tinha janela
+     aberta e não a reivindicou em `hello.active_windows` (ou o epoch não confere), a janela é fechada no
+     mesmo estado (o `event` continua `host_back`; sem janela anterior em tolerância, `turn_ended`).
+     Clientes DEVERIAM mostrar "<nome> voltou" só se tinham mostrado a queda (estado anterior `offline`).
 4. **Reinício do servidor**: todas as conexões caem; a tolerância conta a partir do boot e vale
    `SERVER_RESTART_GRACE_S` (60 s).
 5. **Revogação do dispositivo host** → `host = null` em todos os chats dele.
@@ -905,18 +925,22 @@ Um lote com `session`/`message` do chat X e `chat_bases[X] = b` é aceito se **t
 - o `chat` X existe e não está apagado (ou é criado no mesmo lote);
 - `b == head(X)`;
 - e um dos modos:
-  - **(A) janela do host**: D é o host de X, está conectado, há janela aberta por D, e `host_epochs[X] == epoch`;
-  - **(B) replay**: não há janela aberta em X (por ninguém) — qualquer dispositivo. Se X está sem host e
-    `D.can_host`, D vira host (é quem rodou por último). Execução offline **não** troca o host.
+  - **(A) janela do host**: há janela aberta em X, D é o host de X e o WebSocket de D está **conectado**
+    (não em tolerância). `host_epochs[X]` é opcional; se vier, tem de ser o `epoch` atual.
+  - **(B) replay**: não há janela aberta em X (por ninguém) — qualquer dispositivo. Um host que mande
+    `host_epochs` certo com a janela fechada também cai aqui. Se X está sem host e `D.can_host`, D vira
+    host (é quem rodou por último; `epoch+1`, `event: host_changed`). Execução offline **não** troca o host.
 
-Falhas:
-- Janela aberta por outro dispositivo → `chat_busy` (tentar de novo quando a janela fechar; a essa altura
-  `head` terá avançado → divergência, que é o correto).
-- `host_epochs` presente mas D não é mais host / epoch velho → `not_host` (o cliente passa a tratar o
+Falhas (verificadas nesta ordem):
+- X divergente → `chat_diverged`.
+- `b > head` → `stale_base` (bug do cliente: puxar e recalcular; `details.head`).
+- `b < head` → o servidor marca a **divergência** (§9) e responde `chat_diverged` — salvo se
+  `(chat, D, b)` já estiver em `divergence_discards`: aí `divergence_discarded` (`details: { chat_id, divergence_id }`).
+- `host_epochs[X]` presente mas D não é o host / epoch velho → `not_host` (o cliente passa a tratar o
   conteúdo como replay).
-- `b < head` → o servidor marca a **divergência** (§9) — salvo se for uma versão já descartada
-  (`divergence_discarded`) — e responde `chat_diverged`.
-- `b > head` → `stale_base` (bug do cliente: puxar e recalcular).
+- Janela aberta e D não é o host, **ou** D é o host mas o WebSocket dele está em tolerância (ex.: push
+  por REST com o WS caído) → `chat_busy` (tentar de novo quando a janela fechar / o WS voltar; se nesse
+  meio-tempo o `head` avançar, vira divergência, que é o correto).
 
 Toda mutação de conteúdo **online** (rodar turno, editar/apagar mensagem, regenerar, compactar, extrair
 memórias — que grava a mensagem de extração) acontece **no host, dentro de uma janela**. Num controle
@@ -926,7 +950,9 @@ remoto, essas ações viram comandos (§8.6).
 
 1. Usuário envia no host (ou chega um comando `send`). Chat ocioso → `host.begin {purpose: 'run'}`.
 2. Runner roda como hoje; cada mensagem persistida entra na outbox e é enviada (lotes a cada ~250 ms,
-   `chat_bases[X] = head` corrente, `host_epochs[X] = epoch`). Ack → `head` novo.
+   `chat_bases[X] = head` corrente, `host_epochs[X] = epoch`). Ack → `head` novo. O app atualiza
+   `chat.updatedAt` a cada mensagem, então o registro `chat` (LWW) também é reenviado durante o turno —
+   comportamento aceito (um lote LWW separado, coalescido pela outbox).
 3. Eventos efêmeros vão pelo stream (§11).
 4. Chat ocioso (nenhuma sessão rodando/esperando, inclusive subagentes em segundo plano; nenhuma
    aprovação/questionário/retry pendente) e outbox vazia → `host.end`.
@@ -1009,6 +1035,9 @@ expiração nem entrega na reconexão.
   recebe `remote.failed` e mostra os textos como não entregues).
   O servidor concede a N (`host.granted`), avisa o antigo (`host.revoked {reason: 'handover'}`) e
   transmite `event: host_changed`.
+- `host.release` **sem** troca pendente: o chat fica **sem host** (`host = null`, `epoch+1`, janela
+  fechada; broadcast `event: host_changed` com `reason: 'released'` e `device_id` = quem liberou). Itens
+  em `forwarded` nesse caso não têm destino: o remetente recebe `remote.failed {host_offline}` para cada um.
 - `host.handover_cancel { chat_id }` (por N ou pelo host) desfaz a troca pendente.
 - Ao virar host, N DEVE: puxar até `head`; resolver a raiz local do chat (se não tiver `cwd` local para
   esse chat → pedir a pasta, padrão `defaultCwd`); atualizar `chat.hostCwd`; então processar os itens repassados.
@@ -1091,8 +1120,11 @@ transmite `event: diverged`.
 - Primeiro frame do cliente em até 10 s: `hello`. Uma conexão por dispositivo: uma nova do mesmo
   `device_id` fecha a anterior com `4409 superseded`.
 - Formato: `{ "t": "<tipo>", "id"?: "<id do cliente>", ...campos }`. Toda **requisição** do cliente tem
-  `id` e recebe exatamente um `ack {re: id, ...}` ou `error {re: id, code, message, details}`. Eventos
-  do servidor não têm `re`.
+  `id` e recebe exatamente um `ack` ou `error`. Os campos do resultado ficam **no nível de cima do frame**,
+  ao lado de `t` e `re` (não há objeto aninhado): ex. `{"t":"ack","re":"7","epoch":8,"head":905,"became_host":true}`,
+  `{"t":"error","re":"7","code":"not_host","message":"…","details":{…}}`. O `welcome` é o `ack` do
+  `hello` (`{"t":"welcome","re":"<id do hello>",…}`); `pong` traz `re` se o `ping` tinha `id`. Eventos do
+  servidor não têm `re`. Nas tabelas abaixo, a coluna `ack` lista esses campos de nível superior.
 
 ### 10.2 Confiabilidade
 
@@ -1106,8 +1138,18 @@ transmite `event: diverged`.
   cliente reconecta. O servidor considera a conexão morta após 30 s sem nenhum frame.
 - **Reconexão**: backoff exponencial com jitter total: `delay = random(0, min(30 s, 1 s · 2^tentativa))`;
   zera após 60 s conectado. `4401` → refresh do token e reconecta já; `4403` → parar (dispositivo
-  revogado / conta desativada: apagar credenciais e DEK); `4001` → protocolo incompatível (avisar
-  "atualize o app"); `4409` → não reconectar automaticamente (outra instância assumiu).
+  revogado / conta desativada: apagar credenciais e DEK) — **exceto** logo após `keys.reset` (abaixo);
+  `4001` → protocolo incompatível (avisar "atualize o app"); `4409` → não reconectar automaticamente
+  (outra instância assumiu); `1000` → fechamento normal (inclusive ociosidade: o servidor fecha com
+  `1000 idle_timeout` após 30 s sem frames) → reconectar com o backoff normal.
+- **`keys.reset`**: o servidor envia `keys.reset` a todas as conexões e logo depois fecha cada uma com
+  `4403`, mas **não** revoga dispositivos nem tokens. O cliente que recebeu `keys.reset` apaga DEK e
+  estado de sync, e trata um `4403` recebido **até 30 s depois** do `keys.reset` como "refazer
+  desbloqueio/setup" (não como revogação): reconecta com o mesmo token quando houver chaves novas
+  (`keys_ready` volta a `true` após o setup) e faz o merge do primeiro login (§12). Os cursores antigos
+  passam a receber `410 cursor_expired` (o reset apaga sem tombstones e sobe o piso até o `seq` atual).
+- **`hello.cursor`** é informativo (o servidor não reenvia nada a partir dele; `welcome.head` diz até onde
+  puxar). O site manda `cursor: 0` sem que isso seja um pedido de replay.
 
 ### 10.3 Handshake
 
@@ -1165,20 +1207,23 @@ Depois do `welcome`, o servidor já transmite eventos ao vivo; o cliente puxa de
 | `stream.event` | `chat_id, epoch, n, env, device_id` | conexões inscritas no chat |
 | `stream.resync_request` | `chat_id, requester_device_id` | host |
 | `keys.changed` | `keys_rev` | todas |
-| `keys.reset` | — | todas (depois fecha `4403`) |
+| `keys.reset` | — | todas (depois fecha `4403`, sem revogar dispositivos — §10.2) |
 | `account.deleted` | — | todas (depois fecha `4403`) |
 
 Códigos de fechamento: `4000 protocol_error`, `4001 unsupported_protocol`, `4002 hello_timeout`,
 `4401 unauthorized` (token expirado/ inválido), `4403 forbidden` (revogado, conta banida/apagada,
-chaves resetadas), `4409 superseded`, `4429 rate_limited`, `1001` reinício do servidor.
+chaves resetadas — §10.2), `4409 superseded`, `4429 rate_limited`, `1000` normal/ociosidade, `1001` reinício
+do servidor.
 
 ---
 
 ## 11. Streaming ao vivo
 
-- Só o host envia `stream.event` (o servidor confere: host conectado, `epoch` atual, janela aberta) e
-  o servidor só retransmite para as conexões **inscritas** no chat (chat aberto na tela). Nada é
-  persistido.
+- Só o host envia `stream.event`. O servidor confere que quem envia é o host atual e que `epoch` é o atual
+  — **com ou sem janela aberta** (ex.: o `snapshot` que responde a um `stream.resync` com o chat ocioso,
+  como no início de §16.5) — e retransmite só para as conexões **inscritas** no chat (chat aberto na
+  tela), exceto a do próprio host. Eventos inválidos ou acima de ~50/s por chat são descartados em
+  silêncio (sem ack). Nada é persistido.
 - `n`: contador do host por `(chat, epoch)`, começa em 1, +1 por evento. Plaintext cifrado com
   `K_stream` e AAD `…|stream|<user>|<chat>|<epoch>|<n>`.
 - Plaintext (`sv: 1`) — `kind`:
@@ -1256,7 +1301,7 @@ outra) passa por este merge (registros idênticos não geram envio).
 
 ## 13. Skills (sync opcional)
 
-- Nada de skills é enviado por padrão. Em Configurações → Skills, cada skill tem **"Sincronizar"**: ligar
+- Nada de skills é enviado por padrão. (Renomear = registro novo, §3.12.) Em Configurações → Skills, cada skill tem **"Sincronizar"**: ligar
   envia o bundle cifrado e cria o registro `skill` (id derivado do nome, §3.12). Esse dispositivo passa a
   *acompanhar* a pasta de origem: ao reescanear (mtime/sha do bundle mudou) envia nova revisão.
 - Outros dispositivos veem a seção **"Skills na nuvem"** (registros `skill`, sem baixar bundles) e só
@@ -1309,7 +1354,8 @@ captcha o app pula esta etapa. O app abre uma `BrowserWindow` pequena (sem prelo
 <base>/captcha?client=app&nonce=<16+ chars base64url aleatórios>&action=login
 ```
 
-1. A página renderiza o widget Turnstile (`action` = `login` ou `signup`; `cData` = `nonce`).
+1. A página renderiza o widget Turnstile (`action` = `login` ou `signup` — os únicos valores; o servidor
+   exige `login` em `code/request` e `signup` em `signup/start`; `cData` = `nonce`).
 2. Sucesso → a página navega para `<base>/captcha/done#token=<turnstile_token>&nonce=<nonce>`
    (fragmento: nunca vai ao servidor nem a logs).
 3. O app intercepta em `webContents.on('will-navigate')` (e `did-navigate` como redundância) a URL cuja
@@ -1685,7 +1731,7 @@ responder `429` não revela se a conta existe.
 | `refresh_reused` | 401 | refresh antigo reutilizado (dispositivo revogado) |
 | `forbidden` | 403 | sem permissão |
 | `account_disabled` | 403 | conta banida (só após autenticar) |
-| `device_revoked` | 403 | dispositivo revogado |
+| `device_revoked` | 403 | dispositivo revogado (raro: a revogação apaga os tokens, então o normal é `401 unauthorized`, §5.4) |
 | `key_proof_invalid` | 403 | `key_proof` não confere |
 | `not_found` | 404 | recurso inexistente |
 | `keys_not_ready` / `keys_already_set` | 409 | setup de chaves |
@@ -1693,7 +1739,7 @@ responder `429` não revela se a conta existe.
 | `blob_missing` | 409 | push referencia blob não enviado (`details.missing`) |
 | `chat_busy` | 409 | janela aberta por outro dispositivo / apagar chat rodando |
 | `chat_diverged` | 409 | chat divergente (`details.diverged`) |
-| `divergence_discarded` | 409 | sua versão já foi descartada (`details.divergence_id`) → apagar a versão local e baixar a online |
+| `divergence_discarded` | 409 | sua versão já foi descartada (`details: { chat_id, divergence_id }`, vindo de `divergence_discards`) → apagar a versão local e baixar a online |
 | `divergence_mismatch` | 409 | `divergence_id` velho / dispositivo errado |
 | `stale_base` | 409 | `chat_bases` maior que `head` |
 | `not_host` | 409 | não é o host / epoch velho (`details.state`) |
