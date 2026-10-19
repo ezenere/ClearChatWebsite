@@ -26,3 +26,7 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# cópias locais do .env (contêm segredos)
+.env.*
+!.env.example
