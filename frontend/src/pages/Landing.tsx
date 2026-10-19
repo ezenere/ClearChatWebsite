@@ -1,6 +1,6 @@
 // Página inicial (só com `features.landing`): apresenta o ClearChat, downloads e self-host.
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
-import { Link } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import {
   ArrowRight,
   Bot,
@@ -384,6 +384,12 @@ export default function Landing() {
       alive = false
     }
   }, [downloadUrl])
+
+  // Chegando com âncora (ex.: "Baixar o app" do painel → /#download), rola até a seção.
+  const { hash } = useLocation()
+  useEffect(() => {
+    if (hash) document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' })
+  }, [hash])
 
   useEffect(() => {
     document.title =

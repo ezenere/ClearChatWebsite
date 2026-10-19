@@ -2,6 +2,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router'
 import {
+  Download,
   Lock,
   LogOut,
   Menu,
@@ -97,6 +98,31 @@ function LiveDot() {
   )
 }
 
+// Baixar o app: leva à seção de download da página inicial; sem página inicial (instância com
+// `landing` desligado), abre direto a página de versões.
+function DownloadAppButton({ onNavigate }: { onNavigate?: () => void }) {
+  const info = useSession((s) => s.info)
+  const className =
+    'mx-2.5 mt-2 flex items-center justify-center gap-2 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2 text-[13px] font-medium text-accent-strong transition-colors hover:border-accent/40 hover:bg-accent/10'
+  const content = (
+    <>
+      <Download className="size-4" /> Baixar o app
+    </>
+  )
+  if (info?.features.landing)
+    return (
+      <Link to={{ pathname: '/', hash: '#download' }} onClick={onNavigate} className={className}>
+        {content}
+      </Link>
+    )
+  if (!info?.links.download) return null
+  return (
+    <a href={info.links.download} target="_blank" rel="noopener" className={className}>
+      {content}
+    </a>
+  )
+}
+
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { user, info, lock, logout } = useSession()
   const navigate = useNavigate()
@@ -132,6 +158,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </NavLink>
         ))}
       </nav>
+      <DownloadAppButton onNavigate={onNavigate} />
       <div className="m-2.5 rounded-xl border border-border bg-bg/50 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
