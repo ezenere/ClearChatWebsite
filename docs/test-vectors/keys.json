@@ -1,0 +1,39 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "Subchaves = HKDF-SHA256(DEK, salt vazio, info). Wraps = AES-256-GCM(KEK, nonce, AAD, DEK).",
+  "user_id": "6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b",
+  "dek_hex": "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
+  "subkeys": {
+    "clearchat/v1/record": "a05851153aa5649abdf9886d2c0bb5e4dda1b541b9506d3f12b6b44288463ed4",
+    "clearchat/v1/blob": "bb15e0229230f35146b6fc49393c77718955c76dc7e3f72b11751f07df5c0ae5",
+    "clearchat/v1/blob-id": "5ea005bfa964b33229059d57d5e314298872c9cfadcdd337bc9c2d801bd903f5",
+    "clearchat/v1/stream": "7c21fad4deb1334a84fa57069926feabcff77e243b4e65f8013a7dbce59b6b5d",
+    "clearchat/v1/record-id": "824d618a6f6b60fe344fdd894a4d7b26ee5bd0d040d354086818951fc5498087",
+    "clearchat/v1/key-verify": "17451e78a70b44cf1292b2084260f3d31daa49cf471b990acf904778467d3b12"
+  },
+  "key_proof": "F0UeeKcLRM8SkrIIQmDz0x2qSc9HG5kKz5BHeEZ9OxI",
+  "verifier": "wyPZVzmebGF_79_97_pqLA_VxBgD-ErEg7AaYnH-Ipg",
+  "wraps": [
+    {
+      "slot": "password",
+      "kek_hex": "a28f6d37a57b7c4dd0b8d099ab6d31dc62bb8411dd66ae4d1f8a0410e5d2ee9c",
+      "aad_utf8": "clearchat|v1|dek-wrap|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|password|1",
+      "nonce_hex": "111111111111111111111111",
+      "wrap": {
+        "n": "ERERERERERERERER",
+        "c": "L9qfZU7uFamqph8qJsKMY3rGG1Wj69wz0hmNuz-QWf2m0S14uFZCVInnKs4Tdiwd"
+      }
+    },
+    {
+      "slot": "recovery",
+      "kek_hex": "3b6d712f8cc52303d7a5fb7c5ff1a1ee2886dc4ebc4eaea44512bf11fc160f63",
+      "aad_utf8": "clearchat|v1|dek-wrap|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|recovery|1",
+      "nonce_hex": "222222222222222222222222",
+      "wrap": {
+        "n": "IiIiIiIiIiIiIiIi",
+        "c": "8F_sxi2Lx99E26pYhqXD2HIyiq6DKhKw0nelWrxPbDSJ5SSv-G_tKc-wRpH0vCwS"
+      }
+    }
+  ]
+}

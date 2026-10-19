@@ -1,0 +1,17 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "Chave de recuperação: 20 bytes aleatórios → base32 Crockford (32 chars) + checksum (4 chars = 20 primeiros bits de SHA-256(entropia)), 9 grupos de 4 com hífen. KEK = HKDF-SHA256(entropia, salt_recuperação, \"clearchat/v1/recovery-kek\").",
+  "entropy_hex": "00112233445566778899aabbccddeeff01234567",
+  "formatted": "008J-4CT4-ANK7-F24S-NAXW-SQFE-ZW0J-6HB7-5CDY",
+  "parse_accepts": [
+    "008J-4CT4-ANK7-F24S-NAXW-SQFE-ZW0J-6HB7-5CDY",
+    "oo8j 4ct4 ank7 f24s naxw sqfe zwoj 6hb7 5cdy"
+  ],
+  "parse_rejects": [
+    "008J-4CT4-ANK7-F24S-NAXW-SQFE-ZW0J-6HB7-5CD0",
+    "008J-4CT4-ANK7-F24S-NAXW-SQFE-ZW0J-6HB7"
+  ],
+  "salt": "8OHSw7Sllod4aVpLPC0eDw",
+  "kek_hex": "3b6d712f8cc52303d7a5fb7c5ff1a1ee2886dc4ebc4eaea44512bf11fc160f63"
+}

@@ -1,0 +1,45 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "KEK da senha = Argon2id(UTF-8(NFC(senha)), salt) com hash-wasm. NFD na entrada deve dar o MESMO resultado.",
+  "cases": [
+    {
+      "name": "production-params",
+      "password": "correct horse battery staple — ação ✓",
+      "password_nfd_utf8_hex": "636f727265637420686f727365206261747465727920737461706c6520e28094206163cca761cc836f20e29c93",
+      "password_nfc_utf8_hex": "636f727265637420686f727365206261747465727920737461706c6520e280942061c3a7c3a36f20e29c93",
+      "salt": "AAECAwQFBgcICQoLDA0ODw",
+      "kdf": {
+        "alg": "argon2id",
+        "v": 19,
+        "m": 65536,
+        "t": 3,
+        "p": 1,
+        "len": 32
+      },
+      "kek_hex": "a28f6d37a57b7c4dd0b8d099ab6d31dc62bb8411dd66ae4d1f8a0410e5d2ee9c"
+    },
+    {
+      "name": "fast-test-params (NUNCA aceitar do servidor: fora de ARGON2_BOUNDS)",
+      "password": "correct horse battery staple — ação ✓",
+      "salt": "AAECAwQFBgcICQoLDA0ODw",
+      "kdf": {
+        "alg": "argon2id",
+        "v": 19,
+        "m": 1024,
+        "t": 1,
+        "p": 1,
+        "len": 32
+      },
+      "kek_hex": "eb022a8e2bb1046c35dd23381025ac56218911a940d169d2b1881a8baa4c8959"
+    }
+  ],
+  "bounds": {
+    "mMin": 19456,
+    "mMax": 1048576,
+    "tMin": 2,
+    "tMax": 10,
+    "pMin": 1,
+    "pMax": 4
+  }
+}

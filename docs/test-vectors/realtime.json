@@ -1,0 +1,48 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "Eventos ao vivo (stream), comandos remotos e resultados de comandos: mesmo envelope dos registros, com K_stream.",
+  "user_id": "6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b",
+  "stream_key_hex": "7c21fad4deb1334a84fa57069926feabcff77e243b4e65f8013a7dbce59b6b5d",
+  "cases": [
+    {
+      "name": "stream",
+      "aad_utf8": "clearchat|v1|stream|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|3d6f0a52-7c1e-4b8a-9f2d-0e4c5b6a7d8e|42|17",
+      "json": "{\"sv\":1,\"kind\":\"draft.delta\",\"sessionId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"streamId\":\"f00dbabe-0000-4000-8000-000000000001\",\"off\":{\"content\":120,\"reasoning\":0},\"append\":{\"content\":\" mundo\"}}",
+      "frame_hex": "007b227376223a312c226b696e64223a2264726166742e64656c7461222c2273657373696f6e4964223a2239623861376336642d356534662d346133622d386332642d316530663961386237633664222c2273747265616d4964223a2266303064626162652d303030302d343030302d383030302d303030303030303030303031222c226f6666223a7b22636f6e74656e74223a3132302c22726561736f6e696e67223a307d2c22617070656e64223a7b22636f6e74656e74223a22206d756e646f227d7d",
+      "nonce_hex": "666666666666666666666666",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "ZmZmZmZmZmZmZmZm",
+        "c": "4O-SUV_tdFxfOfQYTQ2Le1D3fgJXcNsf-T_xfEGYBhoRavjhcJRf5Y-2FLx90lLJyUDK6-RbDESEeJCPuaV0mBPjhovixt8QAyLbvHLAu0JXQnJxTHj9h6jziWCrl3_3d-E7tLUeHq3KWeTH7UBGjRLCC19vnvKlPzTOhnaJlPbxOXdmvA0db2-J7FbTY6k2N09w4ZhzM1u0Xn9MM_-Ajq95v_0FhPVG9kK3ohzcfxa6itWWvHv6G-BW_yUihma9T64r39ER32fIhZT1MB5MaexRf5BX"
+      }
+    },
+    {
+      "name": "command",
+      "aad_utf8": "clearchat|v1|command|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|3d6f0a52-7c1e-4b8a-9f2d-0e4c5b6a7d8e|cmd-7f3a",
+      "json": "{\"sv\":1,\"kind\":\"send\",\"sessionId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"text\":\"E agora rode os testes, por favor.\",\"attachments\":[],\"skills\":[],\"createdAt\":1760000200000}",
+      "frame_hex": "007b227376223a312c226b696e64223a2273656e64222c2273657373696f6e4964223a2239623861376336642d356534662d346133622d386332642d316530663961386237633664222c2274657874223a22452061676f726120726f6465206f73207465737465732c20706f72206661766f722e222c226174746163686d656e7473223a5b5d2c22736b696c6c73223a5b5d2c22637265617465644174223a313736303030303230303030307d",
+      "nonce_hex": "777777777777777777777777",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "d3d3d3d3d3d3d3d3",
+        "c": "52F-XHA-52bme2AFZz4UlMDoDEfiX5PPioWtRc06lfoOAawzIU2WfbbEuig92e9wvYjcWqVxteb087EWSnY2u74xIZqF8yrn93WsR-Xy0Xe8l-UuQs0QS6DzaFcrErAdniNt2Iug33wvdJ-b7hAAic1JHVJziPYFz9OjZYzeDh6xTyuaCguNztT9f6W6Q5H5P5Nd8_zxxTeNgIPTLqyO9UWKDIStY_21t4jr8jBqPxNUFAnq21YQjKCSYe0T"
+      }
+    },
+    {
+      "name": "command-result",
+      "aad_utf8": "clearchat|v1|command-result|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|3d6f0a52-7c1e-4b8a-9f2d-0e4c5b6a7d8e|cmd-7f3a",
+      "json": "{\"sv\":1,\"status\":\"accepted\",\"queued\":true}",
+      "frame_hex": "007b227376223a312c22737461747573223a226163636570746564222c22717565756564223a747275657d",
+      "nonce_hex": "888888888888888888888888",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "iIiIiIiIiIiIiIiI",
+        "c": "S5ahSjvrkdf_M2gJw841TDagDiU2I7QyqCXI7ayVJUO3Q7pqwnb3LSIaxjOdFt1hES6y4f3yZ5xJPqc"
+      }
+    }
+  ]
+}

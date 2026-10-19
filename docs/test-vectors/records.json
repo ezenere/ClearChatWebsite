@@ -1,0 +1,105 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "Envelope de registro. frame = byte de formato (0x00 JSON cru | 0x01 deflate-raw) + payload. Para testar CIFRAGEM use frame_hex (o deflate de outra biblioteca pode diferir); para DECIFRAGEM confira que open(envelope) == frame_hex e unframe == json.",
+  "user_id": "6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b",
+  "record_key_hex": "a05851153aa5649abdf9886d2c0bb5e4dda1b541b9506d3f12b6b44288463ed4",
+  "cases": [
+    {
+      "name": "provider-raw",
+      "type": "provider",
+      "id": "0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b",
+      "scope": null,
+      "rev": 1,
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|provider|0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b||1",
+      "json": "{\"sv\":1,\"name\":\"OpenRouter\",\"kind\":\"openrouter\",\"baseUrl\":\"https://openrouter.ai/api/v1\",\"apiKey\":\"sk-or-v1-0000000000000000\",\"headers\":{},\"createdAt\":1760000000000}",
+      "frame_hex": "007b227376223a312c226e616d65223a224f70656e526f75746572222c226b696e64223a226f70656e726f75746572222c226261736555726c223a2268747470733a2f2f6f70656e726f757465722e61692f6170692f7631222c226170694b6579223a22736b2d6f722d76312d30303030303030303030303030303030222c2268656164657273223a7b7d2c22637265617465644174223a313736303030303030303030307d",
+      "nonce_hex": "333333333333333333333333",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "MzMzMzMzMzMzMzMz",
+        "c": "iZWHFZjIYbAwCOrre_8StrktMScvxhQSULMgIxaTfvsafRFb6hfknJcdCQpe63rrZRiNR9rFyorGBak93ycJCmX9wEUCjEKvBsZzCY1-hveDIYK34a_St9YkeDNjrXJ7v-9GYRKju5fMaInmVHeZ-WCJgJy0mOGtFKm7xJEXy73lypwdZPzbu6uJv2sIS8LPg0peBIWvJPnAdiGNZkBVUxwSh90Q_03a1o2ljgzzIvZlRQL7dm0"
+      },
+      "ciphertext_size": 182
+    },
+    {
+      "name": "setting-raw",
+      "type": "setting",
+      "id": "approvalModes",
+      "scope": null,
+      "rev": 12,
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|setting|approvalModes||12",
+      "json": "{\"sv\":1,\"value\":{\"commands\":\"lists\",\"search\":\"always\"}}",
+      "frame_hex": "007b227376223a312c2276616c7565223a7b22636f6d6d616e6473223a226c69737473222c22736561726368223a22616c77617973227d7d",
+      "nonce_hex": "444444444444444444444444",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "RERERERERERERERE",
+        "c": "WjUV8zlH2muwqLVA2tSQIIVYLNCrmKfVSG-qpBDD8zx-UGAMEGL193pFImW9S8Beb5xRe-MUSeZJcEeL6PV263o6HWWpz5l1"
+      },
+      "ciphertext_size": 72
+    },
+    {
+      "name": "message-deflate",
+      "type": "message",
+      "id": "c4d5e6f7-0819-4a2b-8c3d-4e5f60718293",
+      "scope": "3d6f0a52-7c1e-4b8a-9f2d-0e4c5b6a7d8e",
+      "rev": 3,
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|message|c4d5e6f7-0819-4a2b-8c3d-4e5f60718293|3d6f0a52-7c1e-4b8a-9f2d-0e4c5b6a7d8e|3",
+      "json": "{\"sv\":1,\"sessionId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"seq\":7,\"message\":{\"role\":\"assistant\",\"content\":\"Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Olá! Posso ajudar com o parser de SSE.\",\"reasoning\":\"O usuário cumprimentou.\"},\"meta\":{\"model\":\"anthropic/claude-sonnet-4.5\",\"usage\":{\"promptTokens\":1200,\"completionTokens\":210}},\"createdAt\":1760000123456}",
+      "frame_hex": "01e5913172c2301045afa26c6d13d91830ea52a44895cc900b2cd2024a2cada395d2303e0c67e16219159c22cd2ffe9fdfbc7705f905d3352024e239be3930b03f8eb8b35bd76e6838b503ae8fed687bd776a44f7b1c8f75837af901b36b2090089e09cc15124f040650c44bc698a101cb3153cc60e07dbadf9ed4ffc90f1661855fc561529683623563124aca913a1c5e57d04022148e3e9e2b1f55a4dc6fc9b3b225ccc9078a99cb0a96ca3863051cd8d15409c77c493c7bfb6c272c8e5ae11829b7c36a030d94878f397198f3277f5314305daf751512e689b2e7f8e8fb4e2f4b03361166722f194cb7db6aad75d7af87cd76f903",
+      "nonce_hex": "555555555555555555555555",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "VVVVVVVVVVVVVVVV",
+        "c": "A3VSbzes1Tl0k9GpgM6G8lHRbAnRpdAiGfnexl_6W4m6qtvOES9DKsLvyv_vnlmhFGPxiG8DivYxThfkuloljSQWGmwUG_LB91rz9XyMtI6vNqYpkDmi-rOET1xQcD8XINq9ACFgU5UcMbmrZJH9I5v8lYfHhMfoAh1iwgF1sai4pEcUG6iDU26-hTpUMwALSbxiOMDOUJuBPU2ObCH9ZTvEwQxPw4upjEqzQhW3yvujEzdF-bUQC05ll1gq-Gv2zrEUCNlStPdpj_zcwMI93rfPSl2ondqukUZtUBjLpza1vI7pYOiBXTaThDQPl5aCRr9aCzX7Ui39FtGE6iU4LD5oOih-Kg"
+      },
+      "ciphertext_size": 262
+    }
+  ],
+  "must_fail": [
+    {
+      "name": "rev diferente (2)",
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|provider|0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b||2",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "MzMzMzMzMzMzMzMz",
+        "c": "iZWHFZjIYbAwCOrre_8StrktMScvxhQSULMgIxaTfvsafRFb6hfknJcdCQpe63rrZRiNR9rFyorGBak93ycJCmX9wEUCjEKvBsZzCY1-hveDIYK34a_St9YkeDNjrXJ7v-9GYRKju5fMaInmVHeZ-WCJgJy0mOGtFKm7xJEXy73lypwdZPzbu6uJv2sIS8LPg0peBIWvJPnAdiGNZkBVUxwSh90Q_03a1o2ljgzzIvZlRQL7dm0"
+      }
+    },
+    {
+      "name": "tipo diferente (preset)",
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|preset|0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b||1",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "MzMzMzMzMzMzMzMz",
+        "c": "iZWHFZjIYbAwCOrre_8StrktMScvxhQSULMgIxaTfvsafRFb6hfknJcdCQpe63rrZRiNR9rFyorGBak93ycJCmX9wEUCjEKvBsZzCY1-hveDIYK34a_St9YkeDNjrXJ7v-9GYRKju5fMaInmVHeZ-WCJgJy0mOGtFKm7xJEXy73lypwdZPzbu6uJv2sIS8LPg0peBIWvJPnAdiGNZkBVUxwSh90Q_03a1o2ljgzzIvZlRQL7dm0"
+      }
+    },
+    {
+      "name": "outro usuário",
+      "aad_utf8": "clearchat|v1|record|00000000-0000-4000-8000-000000000000|provider|0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b||1",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "MzMzMzMzMzMzMzMz",
+        "c": "iZWHFZjIYbAwCOrre_8StrktMScvxhQSULMgIxaTfvsafRFb6hfknJcdCQpe63rrZRiNR9rFyorGBak93ycJCmX9wEUCjEKvBsZzCY1-hveDIYK34a_St9YkeDNjrXJ7v-9GYRKju5fMaInmVHeZ-WCJgJy0mOGtFKm7xJEXy73lypwdZPzbu6uJv2sIS8LPg0peBIWvJPnAdiGNZkBVUxwSh90Q_03a1o2ljgzzIvZlRQL7dm0"
+      }
+    },
+    {
+      "name": "ciphertext com 1 bit trocado",
+      "aad_utf8": "clearchat|v1|record|6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b|provider|0b9f6a1e-2c3d-4e5f-9a8b-7c6d5e4f3a2b||1",
+      "envelope": {
+        "v": 1,
+        "k": 1,
+        "n": "MzMzMzMzMzMzMzMz",
+        "c": "iJWHFZjIYbAwCOrre_8StrktMScvxhQSULMgIxaTfvsafRFb6hfknJcdCQpe63rrZRiNR9rFyorGBak93ycJCmX9wEUCjEKvBsZzCY1-hveDIYK34a_St9YkeDNjrXJ7v-9GYRKju5fMaInmVHeZ-WCJgJy0mOGtFKm7xJEXy73lypwdZPzbu6uJv2sIS8LPg0peBIWvJPnAdiGNZkBVUxwSh90Q_03a1o2ljgzzIvZlRQL7dm0"
+      }
+    }
+  ]
+}

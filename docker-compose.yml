@@ -1,0 +1,82 @@
+# ClearChat — servidor de sync + site. ESQUELETO: os Dockerfiles de backend/, frontend/ e admin/ ainda
+# serão criados na implementação. Ver docs/ARCHITECTURE.md §8–9.
+name: clearchat
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+    # sem "ports": o Postgres nunca é exposto
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    # 1 worker (hub WS + timers de host em memória); alembic upgrade head no entrypoint
+    command: ["sh", "-c", "alembic upgrade head && uvicorn clearchat_server.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+    depends_on:
+      db: { condition: service_healthy }
+    volumes:
+      - blobs:/data/blobs
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8100}:8000"
+    networks: [internal]
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}   # vira config.js no start (base path em tempo de execução)
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8101}:80"
+    networks: [internal]
+
+  admin:
+    build:
+      context: .
+      dockerfile: admin/Dockerfile          # copia backend/ (modelos) + admin/
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+    volumes:
+      - blobs:/data/blobs                   # apagar conta remove os arquivos
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8190}:8090"   # SEMPRE 127.0.0.1 — nunca exponha, nunca roteie no Nginx
+    networks: [internal]
+
+  # Self-host sem Nginx próprio: `docker compose --profile edge up -d`
+  edge:
+    image: caddy:2-alpine
+    profiles: ["edge"]
+    restart: unless-stopped
+    environment:
+      EDGE_PORT: ${EDGE_PORT:-8080}
+    volumes:
+      - ./deploy/edge.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "${EDGE_PORT:-8080}:${EDGE_PORT:-8080}"
+    depends_on: [api, web]
+    networks: [internal]
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: ${COMPOSE_SUBNET:-172.31.250.0/24}
+
+volumes:
+  pgdata:
+  blobs:

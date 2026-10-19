@@ -1,0 +1,3 @@
+# contrato compartilhado com o app ClearChat: precisa ficar byte a byte idêntico nos dois repositórios
+docs/SYNC_PROTOCOL.md
+docs/test-vectors/*.json

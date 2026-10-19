@@ -1,0 +1,30 @@
+# Perfil "edge" (self-host sem Nginx): uma porta só. Ver docs/ARCHITECTURE.md §9.
+# Com base path (PUBLIC_BASE_URL=.../clearchat), prefixe os matchers (/clearchat/api/*, /clearchat/ws).
+# O edge fica na rede interna: inclua o IP dele em TRUSTED_PROXY_CIDRS (ou a sub-rede inteira).
+{
+	auto_https off
+}
+
+:{$EDGE_PORT} {
+	@api path /api/*
+	@ws path /ws
+	handle @api {
+		request_body {
+			max_size 300MB
+		}
+		reverse_proxy api:8000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	handle @ws {
+		reverse_proxy api:8000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	handle {
+		reverse_proxy web:80
+	}
+	# o admin NUNCA é roteado aqui
+}

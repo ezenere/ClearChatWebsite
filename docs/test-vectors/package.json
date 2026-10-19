@@ -1,0 +1,17 @@
+{
+  "name": "clearchat-sync-test-vectors",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Implementação de referência + vetores de teste do protocolo de sync do ClearChat (docs/SYNC_PROTOCOL.md). Idêntico nos dois repositórios.",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.ts",
+    "check": "node generate.ts --check"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "hash-wasm": "4.12.0"
+  }
+}

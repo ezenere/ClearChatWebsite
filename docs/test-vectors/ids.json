@@ -1,0 +1,32 @@
+{
+  "protocol_version": 1,
+  "note": "Gerado por docs/test-vectors/generate.ts. Binários: hex (minúsculo) quando o campo termina em _hex; base64url sem padding nos demais. Nonces/salts/DEK fixos SÓ para teste.",
+  "description": "IDs derivados por HMAC (o servidor não consegue correlacioná-los com nomes/arquivos conhecidos).",
+  "user_id": "6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b",
+  "record_id_key_hex": "824d618a6f6b60fe344fdd894a4d7b26ee5bd0d040d354086818951fc5498087",
+  "skills": [
+    {
+      "name": "pdf-tools",
+      "hmac_input_utf8": "skill|pdf-tools",
+      "record_id": "sk_fd0be7e5dfca1d0f87dc9ea742a3f9d7"
+    },
+    {
+      "name": "Revisão de código",
+      "hmac_input_utf8": "skill|Revisão de código",
+      "record_id": "sk_bb2cae33f1d1077409a3e01d99165018"
+    },
+    {
+      "name": "my_skill",
+      "hmac_input_utf8": "skill|my_skill",
+      "record_id": "sk_d7ed1280bc7f5a7d84bb24f5184b051b"
+    }
+  ],
+  "blobs": [
+    {
+      "description": "SHA-256 do arquivo \"hello\\n\" (o nome no store do app é <sha256>.<ext>)",
+      "plaintext_utf8": "hello\n",
+      "plaintext_sha256_hex": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+      "blob_id": "44dae342e065b34477e0c63b826dd86ae3a241d2457705b06a1df8cef205518c"
+    }
+  ]
+}

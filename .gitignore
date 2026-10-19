@@ -1,0 +1,28 @@
+# segredos
+.env
+*.env.local
+
+# node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# dados locais
+data/
+*.dump
+*.log
+
+# editores / SO
+.DS_Store
+.idea/
+.vscode/
