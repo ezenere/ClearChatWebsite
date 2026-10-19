@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- O container troca este href pelo caminho de base (PUBLIC_BASE_URL) no start. -->
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0b0f" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      name="description"
+      content="ClearChat — chat desktop minimalista com IA e agentes. Qualquer provedor, ferramentas com aprovação, subagentes, memória, skills e sincronização com criptografia ponta a ponta."
+    />
+    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <title>ClearChat</title>
+    <script src="./config.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript
+      >O site do ClearChat precisa de JavaScript (a criptografia roda no navegador).</noscript
+    >
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

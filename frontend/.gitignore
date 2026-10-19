@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-mock/
+coverage/
+playwright-report/
+test-results/
+e2e/screenshots/
+*.tsbuildinfo
