@@ -61,6 +61,7 @@ COMMAND_KINDS = {
 COMMAND_MAX_BYTES = 1024 * 1024
 STREAM_MAX_BYTES = 256 * 1024
 STREAM_MAX_RATE = 50  # eventos/s por chat (acima disso o servidor descarta)
+STREAM_MAX_CHATS = 256  # chats com estado de taxa por conexão (acima, o evento de um chat novo é descartado)
 REVOKE_QUEUE_MAX = 5000  # host.revoked guardados por dispositivo offline (acima, os mais antigos saem)
 SWEEP = "*"  # chave dos timers por usuário (não casa com RECORD_ID_RE: nunca colide com um chat_id)
 
@@ -97,6 +98,19 @@ def _chat_id(v: Any) -> str:
     if not isinstance(v, str) or not RECORD_ID_RE.match(v):
         raise ApiError("invalid_request", details={"field": "chat_id"})
     return v
+
+
+def _stream_rate_ok(rate: dict[str, deque[float]], chat_id: str, now: float) -> bool:
+    """Janela de 1 s do chat: tira o que venceu (chave vazia sai do dicionário) e diz se ainda cabe um evento."""
+    dq = rate.get(chat_id)
+    if dq is None:
+        return True
+    while dq and now - dq[0] > 1.0:
+        dq.popleft()
+    if not dq:
+        del rate[chat_id]
+        return True
+    return len(dq) < STREAM_MAX_RATE
 
 
 def _cmd_id(v: Any) -> str:
@@ -150,7 +164,6 @@ class Coordinator:
         self.pending_revocations: dict[uuid.UUID, tuple[uuid.UUID, dict[str, dict[str, Any]]]] = {}
         # ("grace" | "force", user_id) → quando vence o timer de varredura do usuário (time.monotonic)
         self._sweep_due: dict[tuple[str, uuid.UUID], float] = {}
-        self._stream_rate: dict[tuple[uuid.UUID, str], deque[float]] = {}
         self._closing = False
 
     # ------------------------------------------------------------------ utilidades
@@ -1048,17 +1061,27 @@ class Coordinator:
             e = parse_envelope(env, "env")
         except ApiError:
             return
-        key = (c.user_id, chat_id)
-        now = time.monotonic()
-        dq = self._stream_rate.setdefault(key, deque())
-        while dq and now - dq[0] > 1.0:
-            dq.popleft()
-        if len(dq) >= STREAM_MAX_RATE:
+        # estado de taxa por conexão (Conn.stream_rate, some com ela), só para chats que ela hospeda: um host
+        # já acima da taxa neste chat é descartado sem ir ao banco; quem não é host nunca aloca nada
+        rate = c.stream_rate
+        if not _stream_rate_ok(rate, chat_id, time.monotonic()):
             return
-        dq.append(now)
+        # autorização (uma linha por chave primária) ANTES de guardar qualquer estado novo
         st = await self._host_of(c.user_id, chat_id)
         if st is None or st.host_device_id != c.device_id or int(st.epoch) != epoch:
             return
+        now = time.monotonic()
+        if not _stream_rate_ok(rate, chat_id, now):
+            return
+        dq = rate.get(chat_id)
+        if dq is None:
+            if len(rate) >= STREAM_MAX_CHATS:
+                for k in [k for k, v in rate.items() if not v or now - v[-1] > 1.0]:
+                    del rate[k]
+                if len(rate) >= STREAM_MAX_CHATS:
+                    return
+            dq = rate[chat_id] = deque()
+        dq.append(now)
         msg = {
             "t": "stream.event",
             "chat_id": chat_id,

@@ -42,6 +42,9 @@ class Conn:
         self.client = client
         self.can_host = can_host
         self.subscriptions: set[str] = set()
+        # chat_id → instantes dos últimos stream.event aceitos (janela de 1 s); só chats que esta conexão
+        # hospeda, com teto de chaves (coordinator.STREAM_MAX_CHATS), e vai embora com a conexão
+        self.stream_rate: dict[str, deque[float]] = {}
         self.last_frame_at = time.monotonic()
         self.closed = False
         self.revoked = False
@@ -142,6 +145,7 @@ class Hub:
 
     def unregister(self, conn: Conn) -> bool:
         """Remove a conexão; True se ela era a conexão atual do dispositivo."""
+        conn.stream_rate.clear()
         users = self.by_user.get(conn.user_id)
         if users is not None:
             users.discard(conn)
