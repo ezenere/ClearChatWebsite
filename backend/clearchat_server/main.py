@@ -163,6 +163,12 @@ def create_app(
 
     @app.exception_handler(ApiError)
     async def _api_error(_r: Request, e: ApiError) -> JSONResponse:
+        if e.code == "invalid_request":
+            # diagnóstico: só o nome do campo e o motivo (nunca valores, envelopes ou conteúdo)
+            log.info(
+                "invalid_request",
+                extra={k: str(e.details[k])[:80] for k in ("field", "reason") if k in e.details},
+            )
         return JSONResponse(e.body(), status_code=e.status, headers=e.headers)
 
     @app.exception_handler(RequestValidationError)
