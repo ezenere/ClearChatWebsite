@@ -6,6 +6,7 @@ create-user EMAIL NOME      cria usuário (sem chaves; entra por código e defin
 invite [--email E] [--days N] [--note T]   gera link de convite de uso único
 settings [--name N] [--signup-open on|off] [--landing on|off] [--captcha on|off]
 gc                          roda uma passada de GC agora
+recompute-usage [--user ID] recalcula os contadores de uso (users.usage_*) a partir das tabelas
 healthcheck [--port 8000]   GET <base>/api/info local (healthcheck do container)
 """
 
@@ -15,6 +16,7 @@ import argparse
 import asyncio
 import secrets
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +46,14 @@ def init_env(example: Path, out: Path, force: bool) -> None:
         if key in gen and line.strip().endswith("="):
             line = f"{key}={gen[key]}"
         lines.append(line)
-    out.write_text("\n".join(lines) + "\n")
-    out.chmod(0o600)
+    import os
+
+    # criado já com 0600 (nunca fica, nem por um instante, legível por outros com os segredos dentro);
+    # o fchmod cobre o --force sobre um arquivo antigo com permissão mais aberta
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write("\n".join(lines) + "\n")
     print(f"{out} criado (permissão 600). ADMIN_TOKEN={gen['ADMIN_TOKEN']}")
     print("Revise PUBLIC_BASE_URL, SMTP_* e TURNSTILE_* antes de subir.")
 
@@ -84,6 +92,8 @@ def main(argv: list[str]) -> None:
     p.add_argument("--landing", type=_onoff)
     p.add_argument("--captcha", type=_onoff)
     sub.add_parser("gc")
+    p = sub.add_parser("recompute-usage")
+    p.add_argument("--user", type=uuid.UUID, help="só este usuário (padrão: todos)")
     p = sub.add_parser("healthcheck")
     p.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
@@ -153,9 +163,24 @@ def main(argv: list[str]) -> None:
         async def go() -> Any:
             engine = make_engine(settings.database_url, 2)
             try:
-                ctx = SimpleNamespace(settings=settings, engine=engine, blobs=BlobStore(settings))
+                ctx = SimpleNamespace(settings=settings, engine=engine, blobs=BlobStore(settings, sweep=False))
                 return await run_gc(ctx)  # type: ignore[arg-type]  # só usa settings/engine/blobs
             finally:
                 await engine.dispose()
 
         print(asyncio.run(go()))
+    elif args.cmd == "recompute-usage":
+        from .db import make_engine
+        from .sync.usage import recompute_all
+
+        async def recompute() -> Any:
+            engine = make_engine(settings.database_url, 2)
+            try:
+                return await recompute_all(engine, args.user)
+            finally:
+                await engine.dispose()
+
+        out = asyncio.run(recompute())
+        for uid, diff in out["changes"].items():
+            print(uid, " ".join(f"{c}: {a} → {b}" for c, (a, b) in diff.items()))
+        print(f"{out['checked']} usuário(s) conferido(s), {out['fixed']} corrigido(s)")

@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .db import execute, fetchall, fetchone, fetchval
+from .errors import ApiError
 from .util import iso, utcnow
 
 STATE_SELECT = (
@@ -39,10 +40,21 @@ async def lock_state(conn: AsyncConnection, user_id: uuid.UUID, chat_id: str) ->
     )
 
 
-async def ensure_state(conn: AsyncConnection, user_id: uuid.UUID, chat_id: str) -> Any:
-    """Linha travada do chat (cria se não existir, com ssq novo)."""
+async def ensure_state(conn: AsyncConnection, user_id: uuid.UUID, chat_id: str, cap: int | None = None) -> Any:
+    """Linha travada do chat (cria se não existir, com ssq novo). `cap`: teto de linhas do usuário para criar
+    uma nova (413 quota_exceeded, `kind: chat_states`); None = sem teto."""
     row = await lock_state(conn, user_id, chat_id)
     if row is None:
+        if cap is not None:
+            used = int(
+                await fetchval(
+                    conn,
+                    "SELECT count(*) FROM (SELECT 1 FROM chat_states WHERE user_id = :u LIMIT :n) t",
+                    {"u": user_id, "n": cap},
+                )
+            )
+            if used >= cap:
+                raise ApiError("quota_exceeded", details={"kind": "chat_states", "used": used, "limit": cap})
         ssq = await next_ssq(conn, user_id)
         await execute(
             conn,

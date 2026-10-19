@@ -63,6 +63,26 @@ SECURITY_HEADERS = [
 ]
 
 
+# Visão geral: 14 dias numa consulta só, limitada à janela por faixa de índice (activity (kind, at DESC),
+# usage_daily (day)) em vez de subconsultas por dia que varriam a tabela inteira. `at >= current_date - 13`
+# equivale a `at::date >= current_date - 13` (mesmo fuso da sessão), então a saída é a mesma de antes.
+DASHBOARD_DAYS_SQL = (
+    "WITH d AS (SELECT generate_series(current_date - 13, current_date, interval '1 day')::date AS day), "
+    "a AS (SELECT at::date AS day, "
+    "  count(*) FILTER (WHERE kind = 'login') AS logins, "
+    "  count(*) FILTER (WHERE kind = 'signup') AS signups, "
+    "  count(*) FILTER (WHERE kind IN ('login_failed', 'refresh_reused')) AS failures "
+    "  FROM activity WHERE kind IN ('login', 'signup', 'login_failed', 'refresh_reused') "
+    "  AND at >= current_date - 13 GROUP BY 1), "
+    "u AS (SELECT day, sum(pushes) AS pushes, sum(blob_uploads) AS uploads, count(DISTINCT user_id) AS active "
+    "  FROM usage_daily WHERE day >= current_date - 13 AND day <= current_date GROUP BY day) "
+    "SELECT d.day, COALESCE(a.logins, 0) AS logins, COALESCE(a.signups, 0) AS signups, "
+    "COALESCE(a.failures, 0) AS failures, COALESCE(u.pushes, 0) AS pushes, COALESCE(u.uploads, 0) AS uploads, "
+    "COALESCE(u.active, 0) AS active "
+    "FROM d LEFT JOIN a ON a.day = d.day LEFT JOIN u ON u.day = d.day ORDER BY d.day DESC"
+)
+
+
 class SecurityHeaders:
     """CSP e cabeçalhos defensivos em toda resposta (os estáticos podem ir para o cache)."""
 
@@ -208,14 +228,27 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
             return render(request, "login.html", {"error": "Token inválido."}, 401)
         resp = RedirectResponse("/", status_code=303)
         cookie = serializer.dumps({"sid": secrets.token_urlsafe(16), "csrf": secrets.token_urlsafe(24)})
-        resp.set_cookie(SESSION_COOKIE, cookie, max_age=SESSION_MAX_AGE, httponly=True, samesite="strict", path="/")
+        # Secure quando o painel é servido por https (ADMIN_HTTPS=true atrás de um proxy TLS, ou TLS direto);
+        # em http na rede local/túnel SSH o cookie continua sem Secure (senão o navegador o descartaria).
+        secure = settings.admin_https or request.url.scheme == "https"
+        resp.set_cookie(
+            SESSION_COOKIE,
+            cookie,
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            secure=secure,
+            samesite="strict",
+            path="/",
+        )
         return resp
 
     @app.post("/logout")
     async def logout(request: Request, csrf: str = Form("")) -> Response:
         require_csrf(request, csrf)
         resp = RedirectResponse("/login", status_code=303)
-        resp.delete_cookie(SESSION_COOKIE, path="/")
+        resp.delete_cookie(
+            SESSION_COOKIE, path="/", secure=settings.admin_https or request.url.scheme == "https", samesite="strict"
+        )
         return resp
 
     # ---------------------------------------------------------- painel
@@ -236,19 +269,7 @@ def create_admin_app(settings: Settings | None = None, mailer: Mailer | None = N
                 "(SELECT COALESCE(sum(usage_blobs), 0) FROM users) AS blobs, "
                 "(SELECT COALESCE(sum(usage_blob_bytes), 0) FROM users) AS blob_bytes",
             )
-            days = await fetchall(
-                c,
-                "WITH d AS (SELECT generate_series(current_date - 13, current_date, interval '1 day')::date AS day) "
-                "SELECT d.day, "
-                "(SELECT count(*) FROM activity a WHERE a.kind = 'login' AND a.at::date = d.day) AS logins, "
-                "(SELECT count(*) FROM activity a WHERE a.kind = 'signup' AND a.at::date = d.day) AS signups, "
-                "(SELECT count(*) FROM activity a WHERE a.kind IN ('login_failed', 'refresh_reused') "
-                "  AND a.at::date = d.day) AS failures, "
-                "(SELECT COALESCE(sum(pushes), 0) FROM usage_daily u WHERE u.day = d.day) AS pushes, "
-                "(SELECT COALESCE(sum(blob_uploads), 0) FROM usage_daily u WHERE u.day = d.day) AS uploads, "
-                "(SELECT count(DISTINCT user_id) FROM usage_daily u WHERE u.day = d.day) AS active "
-                "FROM d ORDER BY d.day DESC",
-            )
+            days = await fetchall(c, DASHBOARD_DAYS_SQL)
             recent = await fetchall(
                 c,
                 "SELECT a.kind, a.ip, a.at, a.meta, u.email FROM activity a LEFT JOIN users u ON u.id = a.user_id "

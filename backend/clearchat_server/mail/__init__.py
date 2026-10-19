@@ -1,6 +1,8 @@
 """Envio de e-mail: SMTP (aiosmtplib), console (desenvolvimento: escreve o e-mail no log) ou memória (testes).
 
-Falha de SMTP é logada (sem o código) e nunca muda a resposta HTTP."""
+Falha de SMTP é logada (sem o código) e nunca muda a resposta HTTP. `MAIL_BACKEND=auto` sem `SMTP_HOST`
+não cai mais para o console: nada é enviado, a subida avisa alto e o log de cada e-mail não leva o conteúdo
+(o código só vai para o log com `MAIL_BACKEND=console` escolhido explicitamente)."""
 
 from __future__ import annotations
 
@@ -103,11 +105,25 @@ def welcome_mail(to: str, instance: str, login_url: str) -> Mail:
     return Mail(to, subject, text, _wrap_html(body, instance), "welcome")
 
 
+def resolve_backend(settings: Settings) -> str:
+    """smtp | console | memory | none (auto sem SMTP_HOST: não envia e não escreve o código no log)."""
+    if settings.mail_backend == "auto":
+        return "smtp" if settings.smtp_host else "none"
+    return settings.mail_backend
+
+
 class Mailer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.backend = settings.effective_mail_backend
+        self.backend = resolve_backend(settings)
         self.outbox: list[Mail] = []  # backend "memory"
+        if self.backend == "none":
+            log.warning(
+                "MAIL_BACKEND=auto sem SMTP_HOST: NENHUM e-mail será enviado (códigos de login e cadastro não "
+                "chegam). Configure SMTP_* — ou MAIL_BACKEND=console só em desenvolvimento."
+            )
+        elif self.backend == "console":
+            log.warning("MAIL_BACKEND=console: os e-mails, COM os códigos, vão para o log (só desenvolvimento)")
 
     async def send(self, mail: Mail) -> None:
         try:
@@ -116,6 +132,9 @@ class Mailer:
             elif self.backend == "console":
                 # só desenvolvimento: o corpo (com o código) vai para o log
                 log.warning("e-mail (MAIL_BACKEND=console) para %s — %s\n%s", mail.to, mail.subject, mail.text)
+            elif self.backend == "none":
+                # sem destinatário, assunto nem corpo (o assunto do código leva o próprio código)
+                log.warning("e-mail NÃO enviado: SMTP não configurado", extra={"kind": mail.kind})
             else:
                 await self._smtp(mail)
         except Exception as e:  # nunca propaga: a resposta HTTP já foi dada

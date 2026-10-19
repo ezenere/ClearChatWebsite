@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { ApiClient } from '../api/client'
+import { ApiClient, ApiError } from '../api/client'
+import type { Change, PushRequest } from '../api/types'
 import { createKeyMaterial, deriveSubkeys, openRecord, sealRecord, ARGON2_DEFAULT } from '../crypto'
 import { emptyDb, MockServer } from '../mock/server'
 import { createMockFetch } from '../mock/transport'
@@ -155,5 +156,222 @@ describe('Repo (envelopes de registro de ponta a ponta)', () => {
     const view = await loadChat(repo, 'c')
     expect(view!.main!.messages.map((m) => m.plain.seq)).toEqual([1, 2])
     expect(await loadChat(repo, 'nao-existe')).toBeNull()
+  })
+})
+
+describe('Repo: registro autêntico fora do contexto pedido (servidor não confiável)', () => {
+  const USER = '6f1c2b9e-3a4d-4e5f-8a7b-9c0d1e2f3a4b'
+
+  /** Registro selado de verdade (AAD = os próprios rótulos), como o servidor o guardaria. */
+  async function sealed(
+    sk: Awaited<ReturnType<typeof deriveSubkeys>>,
+    type: string,
+    id: string,
+    scope: string | null,
+    plain: Record<string, unknown>,
+    rev = 1
+  ): Promise<Change> {
+    const env = await sealRecord(sk.record, USER, { type, id, scope, rev }, plain)
+    return {
+      seq: rev,
+      type,
+      id,
+      scope,
+      rev,
+      deleted: false,
+      env,
+      size: 1,
+      blobs: [],
+      device_id: 'd',
+      updated_at: new Date(0).toISOString()
+    }
+  }
+
+  /** Servidor stub: devolve o que o teste mandar, ignorando o tipo/escopo/id pedidos. */
+  function stubRepo(
+    sk: Awaited<ReturnType<typeof deriveSubkeys>>,
+    h: {
+      list?: (q: { type?: string; scope?: string }) => Change[]
+      fetch?: (items: { type: string; id: string }[]) => Change[]
+      push?: (body: PushRequest) => never
+    }
+  ) {
+    const api = {
+      records: async (q: { type?: string; scope?: string }) => ({
+        records: h.list?.(q) ?? [],
+        next: 0,
+        has_more: false
+      }),
+      fetchRecords: async (items: { type: string; id: string }[]) => ({
+        records: h.fetch?.(items) ?? []
+      }),
+      push: async (body: PushRequest) => h.push!(body)
+    } as unknown as ApiClient
+    return new Repo(api, USER, sk)
+  }
+
+  const subkeys = () => deriveSubkeys(new Uint8Array(32).fill(7))
+  const chatPlain = (title: string, mainSessionId: string) => ({
+    sv: 1,
+    title,
+    config: {},
+    mainSessionId,
+    createdAt: 1,
+    updatedAt: 1
+  })
+
+  it('listDecrypted: sessão/mensagem de outro chat ou de outro tipo vai para "broken"', async () => {
+    const sk = await subkeys()
+    const sB = await sealed(sk, 'session', 'sB', 'chatB', { sv: 1, chatId: 'chatB', createdAt: 1 })
+    const mB = await sealed(sk, 'message', 'mB', 'chatB', {
+      sv: 1,
+      sessionId: 'sB',
+      seq: 1,
+      message: { role: 'user', content: 'ONLY-IN-CHAT-B' },
+      meta: {},
+      createdAt: 1
+    })
+    const repo = stubRepo(sk, { list: () => [sB, mB] })
+    // a AAD confere (rótulos verdadeiros), mas não é o que foi pedido
+    expect(await openRecord(sk.record, USER, mB, mB.env!)).toBeTruthy()
+    const msgs = await repo.listDecrypted('message', 'chatA')
+    expect(msgs.entries).toEqual([])
+    expect(msgs.broken.map((b) => b.change.id).sort()).toEqual(['mB', 'sB'])
+    expect(msgs.broken[0].error).toMatch(/fora do contexto/)
+    // sem escopo: o tipo ainda é conferido
+    const sessions = await repo.listDecrypted('session')
+    expect(sessions.entries.map((e) => e.change.id)).toEqual(['sB'])
+    expect(sessions.broken.map((b) => b.change.id)).toEqual(['mB'])
+  })
+
+  it('fillOmitted: payload buscado de outro escopo não substitui o listado', async () => {
+    const sk = await subkeys()
+    const real = await sealed(sk, 'message', 'm1', 'chatA', { sv: 1, sessionId: 's', seq: 1 })
+    const other = await sealed(sk, 'message', 'm1', 'chatB', { sv: 1, sessionId: 's', seq: 9 })
+    const listed: Change = { ...real, env: undefined, omitted: true }
+    const repo = stubRepo(sk, { list: () => [listed], fetch: () => [other] })
+    const filled = await repo.fillOmitted([listed])
+    expect(filled[0]).toBe(listed)
+    const r = await repo.listDecrypted('message', 'chatA')
+    expect(r.entries).toEqual([])
+    expect(r.broken).toHaveLength(1)
+    // controle: o mesmo registro (mesmo escopo) substitui normalmente
+    const ok = stubRepo(sk, { list: () => [listed], fetch: () => [real] })
+    expect((await ok.listDecrypted('message', 'chatA')).entries).toHaveLength(1)
+  })
+
+  it('fillOmitted: pede de novo o que o /records/fetch devolveu omitido (orçamento de 8 MiB)', async () => {
+    const sk = await subkeys()
+    const full = await Promise.all(
+      ['m1', 'm2', 'm3'].map((id, i) =>
+        sealed(sk, 'message', id, 'chatA', { sv: 1, sessionId: 's', seq: i })
+      )
+    )
+    const listed = full.map((c): Change => ({ ...c, env: undefined, omitted: true }))
+    const calls: string[][] = []
+    const repo = stubRepo(sk, {
+      list: () => listed,
+      // como o servidor: o primeiro pedido sempre vem com payload, os que não couberem voltam omitidos
+      fetch: (items) => {
+        calls.push(items.map((it) => it.id))
+        return items.map((it, i) => {
+          const c = full.find((f) => f.id === it.id)!
+          return i === 0 ? c : { ...c, env: undefined, omitted: true as const }
+        })
+      }
+    })
+    const filled = await repo.fillOmitted(listed)
+    expect(filled.map((c) => !!c.env && !c.omitted)).toEqual([true, true, true])
+    expect(calls).toEqual([['m1', 'm2', 'm3'], ['m2', 'm3'], ['m3']])
+    const r = await repo.listDecrypted('message', 'chatA')
+    expect(r.entries.map((e) => e.change.id).sort()).toEqual(['m1', 'm2', 'm3'])
+    expect(r.broken).toEqual([])
+  })
+
+  it('fillOmitted: servidor que nunca manda o payload não prende o laço', async () => {
+    const sk = await subkeys()
+    const real = await sealed(sk, 'message', 'm1', 'chatA', { sv: 1, sessionId: 's', seq: 1 })
+    const listed: Change = { ...real, env: undefined, omitted: true }
+    let n = 0
+    const repo = stubRepo(sk, {
+      list: () => [listed],
+      fetch: () => {
+        n++
+        return [listed]
+      }
+    })
+    expect((await repo.fillOmitted([listed]))[0]).toBe(listed)
+    expect(n).toBe(1)
+    expect((await repo.listDecrypted('message', 'chatA')).broken).toHaveLength(1)
+  })
+
+  it('loadChat: chat de outro id é ignorado; sessões/mensagens de outro chat não aparecem', async () => {
+    const sk = await subkeys()
+    const chatA = await sealed(sk, 'chat', 'chatA', 'chatA', chatPlain('Chat A', 'sA'))
+    const chatB = await sealed(sk, 'chat', 'chatB', 'chatB', chatPlain('Chat B', 'sB'))
+    const sB = await sealed(sk, 'session', 'sB', 'chatB', {
+      sv: 1,
+      chatId: 'chatB',
+      parentSessionId: null,
+      depth: 0,
+      createdAt: 1
+    })
+    const mB = await sealed(sk, 'message', 'mB', 'chatB', {
+      sv: 1,
+      sessionId: 'sB',
+      seq: 1,
+      message: { role: 'user', content: 'ONLY-IN-CHAT-B' },
+      meta: {},
+      createdAt: 1
+    })
+    const list = (q: { type?: string }) => (q.type === 'session' ? [sB] : [mB])
+
+    // o servidor responde ao fetch de chatA com o registro (autêntico) de chatB
+    const swapped = stubRepo(sk, { list, fetch: () => [chatB] })
+    expect(await loadChat(swapped, 'chatA')).toBeNull()
+
+    // o chat certo, mas sessões/mensagens de chatB
+    const relocated = stubRepo(sk, { list, fetch: () => [chatA] })
+    const view = await loadChat(relocated, 'chatA')
+    expect(view!.chat.plain.title).toBe('Chat A')
+    expect(view!.main).toBeNull()
+    expect(view!.subagents).toEqual([])
+    expect(view!.broken).toBe(2)
+    expect(JSON.stringify(view)).not.toContain('ONLY-IN-CHAT-B')
+  })
+
+  it('save: conflito cujo "current" é outro registro → relança, sem re-selar o plaintext alheio', async () => {
+    const sk = await subkeys()
+    const chatB = await sealed(
+      sk,
+      'chat',
+      'chatB',
+      'chatB',
+      {
+        ...chatPlain('Chat B', 'sB'),
+        secretField: 'B-ONLY'
+      },
+      2
+    )
+    const pushes: PushRequest[] = []
+    const repo = stubRepo(sk, {
+      push: (body) => {
+        pushes.push(body)
+        throw new ApiError(409, 'conflict', '', {
+          conflicts: [{ type: 'chat', id: 'chatA', reason: 'rev_mismatch', current: chatB }]
+        })
+      }
+    })
+    const seen: unknown[] = []
+    const err = await repo
+      .save({ type: 'chat', id: 'chatA', scope: 'chatA' }, null, (cur) => {
+        seen.push(cur)
+        return { ...(cur ?? chatPlain('Chat A', 'sA')), title: 'Editado' }
+      })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).code).toBe('conflict')
+    expect(seen).toEqual([null])
+    expect(pushes).toHaveLength(1)
   })
 })

@@ -118,6 +118,7 @@ CREATE TABLE users (
   quota_record_bytes bigint, quota_records integer, quota_blob_bytes bigint, quota_devices integer,
   usage_record_bytes bigint NOT NULL DEFAULT 0, usage_records integer NOT NULL DEFAULT 0,
   usage_blob_bytes   bigint NOT NULL DEFAULT 0, usage_blobs integer NOT NULL DEFAULT 0
+  -- 0002: CHECK (usage_* >= 0) nas quatro colunas de uso (users_usage_*_nonneg)
 );
 
 CREATE TABLE invites (
@@ -160,10 +161,20 @@ CREATE TABLE devices (
   last_seen_at   timestamptz, last_ip inet,
   revoked_at     timestamptz,
   refresh_hash   bytea UNIQUE,                 -- refresh atual
-  refresh_prev_hash bytea,                     -- anterior (detecção de reuso)
+  refresh_prev_hash bytea,                     -- anterior (legado; a detecção usa o histórico abaixo)
   refresh_expires_at timestamptz
 );
 CREATE INDEX ON devices (user_id) WHERE revoked_at IS NULL;
+
+-- 0002: todo refresh já rotacionado do dispositivo, até a validade dele. Apresentar qualquer um de novo
+-- (de qualquer geração) é reuso → revoga o dispositivo (SYNC_PROTOCOL §5.4). O GC apaga os expirados.
+CREATE TABLE device_refresh_history (
+  token_hash  bytea PRIMARY KEY,               -- SHA-256(refresh rotacionado)
+  device_id   uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  expires_at  timestamptz NOT NULL
+);
+CREATE INDEX ON device_refresh_history (device_id);
+CREATE INDEX ON device_refresh_history (expires_at);
 
 CREATE TABLE access_tokens (
   token_hash  bytea PRIMARY KEY,
@@ -258,7 +269,7 @@ CREATE TABLE rate_counters (
   PRIMARY KEY (bucket, window_start)
 );
 CREATE TABLE lockouts (
-  key        text PRIMARY KEY,             -- 'email:<hmac hex>'
+  key        text PRIMARY KEY,             -- 'email:<hmac hex>:<rede do cliente>' (IPv4 /24, IPv6 /64)
   until      timestamptz NOT NULL,
   level      smallint NOT NULL DEFAULT 1   -- 1h, 2h, 4h … 24h
 );
@@ -273,6 +284,7 @@ CREATE TABLE activity (
 );
 CREATE INDEX ON activity (user_id, at DESC);
 CREATE INDEX ON activity (at DESC);
+CREATE INDEX ON activity (kind, at DESC);      -- 0002: visão geral do painel (janela de 14 dias)
 
 -- contadores diários de uso para o painel (sem conteúdo): um upsert por push/upload em vez de uma
 -- linha de activity a cada push (o host empurra a cada ~250 ms durante um turno)
@@ -284,8 +296,10 @@ CREATE TABLE usage_daily (
 );
 ```
 
-A migração inicial (`backend/clearchat_server/db/alembic/versions/0001_initial.py`) é exatamente este
-esquema (com nomes explícitos nos índices).
+A migração inicial (`backend/clearchat_server/db/alembic/versions/0001_initial.py`) é este esquema sem
+as linhas marcadas `0002` (com nomes explícitos nos índices); `0002_auth_hardening.py` acrescenta o
+histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as restrições de uso não negativo
+(zerando antes contadores que tenham derivado para negativo).
 
 ### 3.1 Transações e concorrência
 
@@ -333,13 +347,19 @@ esquema (com nomes explícitos nos índices).
   `COMMAND_RESULT_TIMEOUT_S` (30 s) → `remote.failed` ao remetente. Host fora → `host_offline` na hora.
 - **Jobs** (asyncio, a cada 5 min, com `pg_try_advisory_lock` para nunca rodar em dobro):
   tombstones > 180 d (atualiza `tombstone_floor`), blobs sem referência > 24 h (apaga arquivo e linha),
-  `push_receipts` > 7 d, `email_codes` expirados > 1 d, `rate_counters` velhos, `activity` > 90 d, `access_tokens` expirados.
+  `push_receipts` > 7 d, `email_codes` expirados > 1 d, `rate_counters` velhos, `activity` > 90 d, `access_tokens` expirados,
+  histórico de rotação do refresh expirado (`auth.tokens.prune_refresh_history`).
 - **E-mail**: aiosmtplib com `SMTP_TLS_MODE` = `starttls` | `ssl` | `none`; templates pt-BR em texto puro
   + HTML simples ("Seu código ClearChat: 123456", validade, "se não foi você, ignore"; convite; "você já
-  tem conta"). Falha de SMTP é logada (sem o código) e não muda a resposta HTTP.
+  tem conta"). Falha de SMTP é logada (sem o código) e não muda a resposta HTTP. `MAIL_BACKEND=auto` sem
+  `SMTP_HOST` não envia nada: a subida registra um aviso alto e cada e-mail vira só um aviso com o tipo
+  (sem destinatário, assunto ou código) — o console com código só existe se escolhido explicitamente.
 - **Logs**: JSON estruturado; nunca registrar tokens, códigos, `key_proof`, envelopes ou corpos de push;
-  e-mails só como HMAC. Exceção consciente: `MAIL_BACKEND=console` (desenvolvimento) escreve o e-mail
-  inteiro, com o código, no log.
+  e-mails só como HMAC. O log de requisições troca o token de convite do caminho por `***`; o engine do
+  SQLAlchemy usa `hide_parameters=True` (erros sem os valores dos parâmetros). Exceção consciente:
+  `MAIL_BACKEND=console` (desenvolvimento, só se escolhido explicitamente) escreve o e-mail inteiro, com o
+  código, no log.
+- **CORS**: só com `ALLOWED_ORIGINS` (lista exata, com credenciais); `*` é recusado na subida.
 
 ### 4.1 Lacunas do contrato
 
@@ -347,7 +367,7 @@ As interpretações adotadas durante a implementação (corpos de resposta de `/
 `divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
 tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
 sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
-`docs/SYNC_PROTOCOL.md` (v1.0.0, ainda não lançado) — vale o que está lá.
+`docs/SYNC_PROTOCOL.md` (v1.1.0, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 
@@ -364,7 +384,12 @@ Duas camadas:
    `/api/v1/auth/` → `cc_auth burst=10 nodelay`; `/api/` → `cc_api burst=60 nodelay`; `/ws` → `cc_ws burst=10`.
 2. **Aplicação** (contadores em `rate_counters`, janela fixa; bloqueios em `lockouts`): os limites de
    SYNC_PROTOCOL §17.3, por e-mail (HMAC) e por IP; respostas `429` com `Retry-After`. Mesmo sem
-   captcha (self-host sem Turnstile), esta camada continua.
+   captcha (self-host sem Turnstile), esta camada continua. O `code/verify` conta por e-mail + rede do
+   cliente (IPv4 /24, IPv6 /64), com um teto alto só por e-mail, e o bloqueio só soma erros contra um código
+   vivo — quem não lê a caixa de e-mail não esgota o limite nem bloqueia o dono. Login sem conta (ou banida)
+   e cadastro de conta existente gravam um código que nunca é enviado, para o bloqueio não revelar contas.
+   Troca de wrap (`PUT /keys/password|recovery`): 10/h por conta. Os limites por IP dependem do IP real:
+   proxy fora de `TRUSTED_PROXY_CIDRS` = todos os clientes com o IP do proxy, dividindo os mesmos baldes.
 
 ## 6. Painel admin (só do dono, nunca exposto)
 
@@ -378,7 +403,8 @@ Duas camadas:
 - **O Nginx nunca roteia para ele** (nenhum `location` aponta para a porta do admin; o exemplo de Nginx
   não o menciona). Vale também em self-host.
 - Autenticação: `ADMIN_TOKEN` do `.env` (≥ 32 caracteres aleatórios) num formulário de login → cookie de
-  sessão assinado (`HttpOnly`, `SameSite=Strict`, expira em 12 h). Defesas extras: aceita só `Host`
+  sessão assinado (`HttpOnly`, `SameSite=Strict`, expira em 12 h; `Secure` quando o painel é servido por
+  https — `ADMIN_HTTPS=true` atrás de um proxy TLS, ou TLS direto; em http na LAN/túnel fica sem `Secure`). Defesas extras: aceita só `Host`
   `localhost:<porta>`/`127.0.0.1:<porta>` e os de `ADMIN_ALLOWED_HOSTS` (anti DNS rebinding), token CSRF em todo formulário, limite de
   5 tentativas de login/min, comparação em tempo constante. Sem token configurado → o admin não sobe
   (no container ele só registra o erro e fica parado, para não reiniciar em loop).
@@ -437,8 +463,9 @@ publicadas só em `127.0.0.1` (`BIND_ADDR=127.0.0.1`, padrão): `API_PORT=8100`,
 `ADMIN_PORT=8190` (o admin usa `ADMIN_BIND_ADDR`, padrão 127.0.0.1, independente do `BIND_ADDR`). Postgres sem
 porta publicada. Uma conexão do Nginx para `127.0.0.1:8100` chega no container vinda do gateway da bridge
 do compose (o docker-proxy reescreve a origem), por isso a rede tem sub-rede fixa (`COMPOSE_SUBNET`,
-padrão `172.31.250.0/24`) e `TRUSTED_PROXY_CIDRS=127.0.0.1/32,172.31.250.1/32` (padrão) — a api só
-aceita `X-Real-IP` vindo daí. (Em self-host com o proxy em outra máquina: `BIND_ADDR` = interface da LAN e
+padrão `172.31.250.0/24`) e `TRUSTED_PROXY_CIDRS=127.0.0.1/32,172.31.250.1/32,172.31.250.250/32`
+(padrão; o `.250` é o Caddy do perfil `edge`, com IP fixo `EDGE_IP`) — a api só aceita `X-Real-IP` vindo
+daí. (Em self-host com o proxy em outra máquina: `BIND_ADDR` = interface da LAN e
 o IP do proxy em `TRUSTED_PROXY_CIDRS`.)
 
 ### 8.1 Nginx (exemplo — `deploy/nginx.example.conf`)
@@ -543,6 +570,8 @@ cp .env.example .env
 #   SERVER_SECRET, ADMIN_TOKEN, POSTGRES_PASSWORD  → openssl rand -base64 48
 #   SMTP_*                                         → seu servidor de e-mail (códigos de login)
 #   TURNSTILE_* vazios                             → sem captcha (rate limit continua)
+#   TRUSTED_PROXY_CIDRS                            → deixe o padrão (inclui o Caddy do edge, EDGE_IP);
+#                                                    proxy próprio em outra máquina? acrescente o IP dele
 docker compose --profile edge up -d --build        # perfil "edge": um proxy Caddy numa porta só (EDGE_PORT)
 ssh -L 8190:127.0.0.1:8190 voce@servidor           # se for remoto; local: http://localhost:8190
 #   painel admin → Configurações da instância → desligar "Cadastro aberto" → Convites → gerar link
@@ -550,6 +579,10 @@ ssh -L 8190:127.0.0.1:8190 voce@servidor           # se for remoto; local: http:
 
 - Sem Nginx próprio: o perfil `edge` sobe um Caddy que roteia `/` → web, `/api` → api, `/ws` → api em
   `EDGE_PORT` (HTTP; para HTTPS público use um domínio no Caddy ou o seu proxy).
+- `TRUSTED_PROXY_CIDRS`: o Caddy do `edge` tem IP fixo na rede interna (`EDGE_IP`, padrão
+  `172.31.250.250`), já incluído no padrão — a api usa o `X-Real-IP` que ele manda e cada cliente tem os
+  próprios limites por IP. Mudou `COMPOSE_SUBNET`? Ajuste `EDGE_IP` e `TRUSTED_PROXY_CIDRS` juntos; um
+  proxy fora da lista faz todos os clientes dividirem o IP dele (e os limites por IP).
 - No app: Configurações → Conta → Servidor → **Self-host** → `http://192.168.0.10:8080` (o app valida
   com `/api/info`).
 - O painel admin continua só em `127.0.0.1` — nunca exponha a porta dele.
@@ -584,7 +617,7 @@ aba, além da reconexão após queda. Sem `CLEARCHAT_IT_BACKEND_URL` os testes s
 ## 11. Checklist de segurança
 
 - TLS obrigatório em produção (HSTS); `http://` só em LAN (o app avisa).
-- Segredos só no `.env` (permissão 600); `.env` no `.gitignore`.
+- Segredos só no `.env` (permissão 600, já criado assim pelo `init-env`); `.env`, `*.pem` e `*.key` no `.gitignore`.
 - Respostas de auth idênticas (sem enumeração); códigos e tokens só como hash.
 - O servidor nunca recebe senha, DEK ou chave de recuperação; `key_proof` só compara com o verifier.
 - Postgres e admin sem exposição externa; Nginx nunca roteia para o admin.

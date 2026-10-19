@@ -42,7 +42,11 @@ export async function makePasswordSlot(
 ): Promise<PasswordSlot> {
   const salt = randomBytes(16)
   const kek = await kekFn(password, salt, kdf)
-  return { kdf, salt: b64u(salt), wrap: await wrapDek(kek, dek, aadWrap(userId, 'password')) }
+  try {
+    return { kdf, salt: b64u(salt), wrap: await wrapDek(kek, dek, aadWrap(userId, 'password')) }
+  } finally {
+    kek.fill(0)
+  }
 }
 
 export async function makeRecoverySlot(
@@ -51,14 +55,21 @@ export async function makeRecoverySlot(
 ): Promise<{ slot: RecoverySlot; recoveryKey: string }> {
   const entropy = randomBytes(20)
   const salt = randomBytes(16)
-  const kek = await recoveryKek(entropy, salt)
-  return {
-    slot: {
-      kdf: { alg: 'hkdf-sha256' },
-      salt: b64u(salt),
-      wrap: await wrapDek(kek, dek, aadWrap(userId, 'recovery'))
-    },
-    recoveryKey: await formatRecoveryKey(entropy)
+  let kek: Bytes | null = null
+  try {
+    kek = await recoveryKek(entropy, salt)
+    return {
+      slot: {
+        kdf: { alg: 'hkdf-sha256' },
+        salt: b64u(salt),
+        wrap: await wrapDek(kek, dek, aadWrap(userId, 'recovery'))
+      },
+      recoveryKey: await formatRecoveryKey(entropy)
+    }
+  } finally {
+    // a chave em texto só sai na string formatada (mostrada uma vez); os bytes não ficam na memória
+    kek?.fill(0)
+    entropy.fill(0)
   }
 }
 
@@ -93,7 +104,11 @@ export async function unlockWithPassword(
   const salt = fromB64u(keys.password.salt)
   if (salt.length !== 16) throw new Error('salt inválido')
   const kek = await kekFn(password, salt, keys.password.kdf)
-  return unwrapDek(kek, keys.password.wrap, aadWrap(userId, 'password', keys.key_version))
+  try {
+    return await unwrapDek(kek, keys.password.wrap, aadWrap(userId, 'password', keys.key_version))
+  } finally {
+    kek.fill(0)
+  }
 }
 
 /** Chave de recuperação → DEK. Checksum errado → RecoveryKeyError antes de qualquer cálculo. */
@@ -103,9 +118,16 @@ export async function unlockWithRecovery(
   recoveryInput: string
 ): Promise<Bytes> {
   const entropy = await parseRecoveryKey(recoveryInput)
-  if (keys.recovery.kdf?.alg !== 'hkdf-sha256') throw new Error('kdf de recuperação não suportado')
-  const kek = await recoveryKek(entropy, fromB64u(keys.recovery.salt))
-  return unwrapDek(kek, keys.recovery.wrap, aadWrap(userId, 'recovery', keys.key_version))
+  let kek: Bytes | null = null
+  try {
+    if (keys.recovery.kdf?.alg !== 'hkdf-sha256')
+      throw new Error('kdf de recuperação não suportado')
+    kek = await recoveryKek(entropy, fromB64u(keys.recovery.salt))
+    return await unwrapDek(kek, keys.recovery.wrap, aadWrap(userId, 'recovery', keys.key_version))
+  } finally {
+    kek?.fill(0)
+    entropy.fill(0)
+  }
 }
 
 /** Corpo de `PUT /keys/password`: salt novo, Argon2id da senha nova, nova wrap da MESMA DEK. */

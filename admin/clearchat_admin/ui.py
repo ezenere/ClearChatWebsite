@@ -200,7 +200,7 @@ def quota_split(v: int | None) -> tuple[str, str]:
     return str(v), "B"
 
 
-_NUM_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
+_NUM_RE = re.compile(r"\A[0-9]+(?:[.,][0-9]+)?\Z")
 
 
 def parse_quota(raw: str, unit: str = "") -> int | None:

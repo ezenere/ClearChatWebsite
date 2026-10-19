@@ -44,6 +44,47 @@ async def test_refresh_rotation_and_reuse_detection(srv):
     assert r.status_code == 401
 
 
+async def test_refresh_family_reuse_revokes_device(srv):
+    """Regressão: R0 apresentado depois de duas rotações (R0→R1→R2) também é reuso e revoga o dispositivo."""
+    s = await srv.signup()
+    c, _ = await srv.ws(s)
+    r1 = (await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": s.refresh})).json()
+    r2 = (await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": r1["refresh_token"]})).json()
+    assert r2["refresh_token"] not in (s.refresh, r1["refresh_token"])
+    r = await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": s.refresh})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "refresh_reused"
+    assert await c.wait_closed() == 4403
+    # o ladrão (com R2) também perdeu a sessão
+    r = await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": r2["refresh_token"]})
+    assert r.status_code in (401, 403)
+    r = await srv.http.get("/api/v1/account", headers={"Authorization": f"Bearer {r2['access_token']}"})
+    assert r.status_code == 401
+    async with srv.ctx.engine.connect() as conn:
+        kinds = (await conn.execute(text("SELECT kind FROM activity WHERE kind = 'refresh_reused'"))).all()
+    assert len(kinds) == 1
+
+
+async def test_refresh_history_prune(srv):
+    from datetime import timedelta
+
+    from clearchat_server.auth.tokens import prune_refresh_history
+    from clearchat_server.jobs import run_gc
+    from clearchat_server.util import utcnow
+
+    s = await srv.signup()
+    r1 = (await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": s.refresh})).json()
+    await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": r1["refresh_token"]})
+    async with srv.ctx.engine.begin() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM device_refresh_history"))).scalar() == 2
+        assert await prune_refresh_history(conn, utcnow()) == 0
+    # o GC periódico faz a poda: nada antes da validade, tudo depois
+    assert (await run_gc(srv.ctx))["refresh_history"] == 0
+    assert (await run_gc(srv.ctx, utcnow() + timedelta(days=61)))["refresh_history"] == 2
+    # depois da validade, R0 nem seria aceito: sem histórico ele é só um token desconhecido
+    r = await srv.http.post("/api/v1/auth/refresh", json={"refresh_token": s.refresh})
+    assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
+
+
 async def test_access_token_expiry(srv):
     s = await srv.signup()
     async with srv.ctx.engine.begin() as c:
@@ -176,6 +217,34 @@ async def test_keys_setup_get_and_change(srv):
         "/api/v1/keys/recovery", json={"key_proof": KEYS["key_proof"], "recovery": new_rk}, headers=s.h
     )
     assert r.status_code == 200 and r.json()["keys_rev"] == 3
+
+
+async def test_keys_change_rate_limit(srv):
+    """Regressão: troca de wrap (senha/recuperação) limitada a 10/h por conta → a 11ª é 429 rate_limited."""
+    s = await srv.signup()
+    assert (await srv.http.post("/api/v1/keys/setup", json=setup_body(), headers=s.h)).status_code == 200
+    pw = setup_body()["password"]
+    rk = setup_body()["recovery"]
+    st = []
+    for i in range(10):
+        if i % 2:
+            r = await srv.http.put(
+                "/api/v1/keys/recovery", json={"key_proof": KEYS["key_proof"], "recovery": rk}, headers=s.h
+            )
+        else:
+            r = await srv.http.put(
+                "/api/v1/keys/password", json={"key_proof": KEYS["key_proof"], "password": pw}, headers=s.h
+            )
+        st.append(r.status_code)
+    assert st == [200] * 10
+    r = await srv.http.put("/api/v1/keys/password", json={"key_proof": KEYS["key_proof"], "password": pw}, headers=s.h)
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    assert int(r.headers["Retry-After"]) > 0
+    # é por conta: outra conta continua livre
+    s2 = await srv.signup()
+    assert (await srv.http.post("/api/v1/keys/setup", json=setup_body(), headers=s2.h)).status_code == 200
+    r = await srv.http.put("/api/v1/keys/password", json={"key_proof": KEYS["key_proof"], "password": pw}, headers=s2.h)
+    assert r.status_code == 200
 
 
 async def test_keys_validation(srv):

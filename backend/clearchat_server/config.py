@@ -48,11 +48,18 @@ class Settings(BaseSettings):
     turnstile_verify_url: str = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
     # rede
-    trusted_proxy_cidrs: str = "127.0.0.1/32,172.31.250.1/32"
+    # gateway da bridge do compose (Nginx no host) e o IP fixo do Caddy do perfil "edge" (EDGE_IP)
+    trusted_proxy_cidrs: str = "127.0.0.1/32,172.31.250.1/32,172.31.250.250/32"
 
     # armazenamento
     blob_storage_dir: str = "/data/blobs"
     blob_max_bytes: int = 300 * 1024 * 1024
+
+    # sync (correções da auditoria)
+    # teto do ciphertext de UM registro no push (413 payload_too_large acima); o corpo do push já é ≤ 32 MiB
+    record_max_bytes: int = 16 * 1024 * 1024
+    # na subida, apaga temporários de upload de blob (*.tmp-*) mais velhos que isto (sobra de queda no meio)
+    blob_tmp_sweep_age_s: float = 3600
 
     # tempos e limites (protocolo §17.1); floats para os testes poderem encurtar
     email_code_ttl_s: int = 600
@@ -78,12 +85,24 @@ class Settings(BaseSettings):
     default_quota_blob_bytes: int | None = None
     default_quota_devices: int | None = None
 
+    # tempo real (correções da auditoria)
+    # teto de chat_states por usuário criados por host.begin/takeover/pin (413 quota_exceeded); 0 = sem teto
+    max_chat_states_per_user: int = 20000
+    # GC: chat_states sem registro de chat, sem host/janela/troca e parados há mais que isto são apagados
+    chat_state_orphan_grace_h: float = 24
+    # confere as conexões vivas contra o banco (revogação/ban perdidos com o LISTEN fora) a cada N s
+    ws_reconcile_interval_s: float = 60
+
     log_level: str = "info"
     log_format: Literal["json", "text"] = "json"
     # desliga os jobs periódicos (testes chamam o GC na mão)
     jobs_enabled: bool = True
     # desliga o LISTEN/NOTIFY (eventos do painel admin)
     notify_listener_enabled: bool = True
+
+    # auth/admin (correções da auditoria)
+    # painel admin servido por https (proxy TLS na frente): cookie de sessão com Secure
+    admin_https: bool = False
 
     @field_validator(
         "default_quota_record_bytes",
@@ -137,12 +156,6 @@ class Settings(BaseSettings):
     @property
     def captcha_keys_present(self) -> bool:
         return bool(self.turnstile_site_key and self.turnstile_secret_key)
-
-    @property
-    def effective_mail_backend(self) -> str:
-        if self.mail_backend == "auto":
-            return "smtp" if self.smtp_host else "console"
-        return self.mail_backend
 
     def secret_bytes(self) -> bytes:
         if not self.server_secret:

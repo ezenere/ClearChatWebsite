@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..chatstate import next_ssq
+from ..chatstate import lock_user, next_ssq
 from ..db import execute, fetchall, fetchval
 
 EVENTS_CHANNEL = "clearchat_events"
@@ -36,9 +36,14 @@ async def notify(conn: AsyncConnection, payload: dict[str, Any]) -> None:
 
 
 async def release_hosted_chats(conn: AsyncConnection, user_id: uuid.UUID, device_ids: list[uuid.UUID]) -> list[str]:
-    """§8.3 (5): dispositivo revogado deixa de ser host (host = null) e de ser destino de troca."""
+    """§8.3 (5): dispositivo revogado deixa de ser host (host = null) e de ser destino de troca.
+
+    Trava antes a linha do usuário (mesma ordem do coordenador: usuário → chat_states), então nenhum
+    host.begin/takeover concorrente fica no meio: ou terminou antes (e o SELECT abaixo o vê) ou espera e
+    depois já enxerga o dispositivo revogado."""
     if not device_ids:
         return []
+    await lock_user(conn, user_id)
     rows = await fetchall(
         conn,
         "SELECT chat_id FROM chat_states WHERE user_id = :u AND (host_device_id = ANY(CAST(:d AS uuid[])) "
@@ -70,7 +75,12 @@ async def release_hosted_chats(conn: AsyncConnection, user_id: uuid.UUID, device
 async def revoke_devices(
     conn: AsyncConnection, user_id: uuid.UUID, device_ids: list[uuid.UUID] | None = None
 ) -> tuple[list[uuid.UUID], list[str]]:
-    """Revoga dispositivos (todos, se `device_ids` for None). Devolve (revogados, chats alterados)."""
+    """Revoga dispositivos (todos, se `device_ids` for None). Devolve (revogados, chats alterados).
+
+    A linha do usuário é travada ANTES de mexer em devices/chat_states (a ordem de todos os outros caminhos):
+    sem isso, um host.begin que travou o usuário e leu o dispositivo ainda ativo podia gravá-lo como host
+    depois do SELECT de release_hosted_chats, deixando um dispositivo revogado como host."""
+    await lock_user(conn, user_id)
     if device_ids is None:
         rows = await fetchall(conn, "SELECT id FROM devices WHERE user_id = :u AND revoked_at IS NULL", {"u": user_id})
     else:

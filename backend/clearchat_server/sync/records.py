@@ -27,15 +27,23 @@ PULL_MAX = 1000
 PAGE_BYTES = 8 * 1024 * 1024
 INLINE_EVENT_BYTES = 256 * 1024
 
-RECORD_COLS = (
-    "seq, type, id, scope_id, rev, deleted, env_v, key_version, nonce, ciphertext, size, blobs, device_id, updated_at"
-)
+# Por registro: teto do ciphertext no push. O protocolo só limita o corpo (32 MiB REST / 4 MiB WS); este
+# valor fica bem acima de qualquer registro legítimo (anexos e bundles vão em blobs). Configurável em
+# RECORD_MAX_BYTES (Settings.record_max_bytes), que REST e WS passam; este é o padrão de quem não passa.
+MAX_RECORD_BYTES = 16 * 1024 * 1024
+
+# metadados (pequenos) separados do payload: leitura sem payload não toca no ciphertext, e com payload só
+# se busca o ciphertext dos registros que cabem no orçamento da página
+META_COLS = "seq, type, id, scope_id, rev, deleted, size, blobs, device_id, updated_at"
+PAYLOAD_COLS = "env_v, key_version, nonce, ciphertext"
 
 IsOnline = Callable[[uuid.UUID], bool]
 
 
 # ---------------------------------------------------------------- serialização
-def change_from_row(row: Any, payload: bool = True) -> dict[str, Any]:
+def change_from_row(row: Any, payload: bool = True, env_row: Any = None) -> dict[str, Any]:
+    """`row` com os metadados; o payload vem de `env_row` (leitura em duas fases) ou do próprio `row`."""
+    src = row if env_row is None else env_row
     ch: dict[str, Any] = {
         "seq": int(row.seq),
         "type": row.type,
@@ -49,12 +57,12 @@ def change_from_row(row: Any, payload: bool = True) -> dict[str, Any]:
         "updated_at": iso(row.updated_at),
     }
     if not row.deleted:
-        if payload and row.ciphertext is not None:
+        if payload and src is not None and src.ciphertext is not None:
             ch["env"] = {
-                "v": int(row.env_v),
-                "k": int(row.key_version),
-                "n": b64u_encode(bytes(row.nonce)),
-                "c": b64u_encode(bytes(row.ciphertext)),
+                "v": int(src.env_v),
+                "k": int(src.key_version),
+                "n": b64u_encode(bytes(src.nonce)),
+                "c": b64u_encode(bytes(src.ciphertext)),
             }
         else:
             ch["omitted"] = True
@@ -89,6 +97,39 @@ async def _repeatable(engine: AsyncEngine) -> AsyncConnection:
     return conn
 
 
+def _budget(rows: list[Any], limit: int, payload: bool) -> tuple[list[Any], bool]:
+    """Corta em `limit` itens ou, com payload, em ~PAGE_BYTES (o primeiro entra sempre). → (linhas, has_more)"""
+    out: list[Any] = []
+    used = 0
+    for row in rows:
+        if len(out) >= limit or (out and payload and used + int(row.size) > PAGE_BYTES):
+            return out, True
+        used += int(row.size) if payload else 0
+        out.append(row)
+    return out, False
+
+
+async def _payloads(conn: AsyncConnection, user_id: uuid.UUID, rows: list[Any]) -> dict[tuple[str, str], Any]:
+    """Segunda fase: nonce/ciphertext só dos registros vivos escolhidos (mesma transação → mesmo snapshot)."""
+    live = [r for r in rows if not r.deleted]
+    if not live:
+        return {}
+    res = await fetchall(
+        conn,
+        f"SELECT type, id, {PAYLOAD_COLS} FROM records WHERE user_id = :u AND (type, id) IN "
+        "(SELECT * FROM unnest(CAST(:t AS text[]), CAST(:i AS text[])))",
+        {"u": user_id, "t": [r.type for r in live], "i": [r.id for r in live]},
+    )
+    return {(r.type, r.id): r for r in res}
+
+
+async def _changes(conn: AsyncConnection, user_id: uuid.UUID, rows: list[Any], payload: bool) -> list[dict[str, Any]]:
+    if not payload:
+        return [change_from_row(r, False) for r in rows]
+    envs = await _payloads(conn, user_id, rows)
+    return [change_from_row(r, True, envs.get((r.type, r.id))) for r in rows]
+
+
 async def pull(engine: AsyncEngine, user_id: uuid.UUID, since: int, limit: int | None, payload: bool) -> dict[str, Any]:
     limit = PULL_DEFAULT if limit is None else limit
     if since < 0 or limit < 1:
@@ -102,21 +143,14 @@ async def pull(engine: AsyncEngine, user_id: uuid.UUID, since: int, limit: int |
             raise ApiError("cursor_expired", details={"floor": int(user.tombstone_floor)})
         rows = await fetchall(
             conn,
-            f"SELECT {RECORD_COLS} FROM records WHERE user_id = :u AND seq > :s ORDER BY seq LIMIT :l",
+            f"SELECT {META_COLS} FROM records WHERE user_id = :u AND seq > :s ORDER BY seq LIMIT :l",
             {"u": user_id, "s": since, "l": limit + 1},
         )
+        page, has_more = _budget(rows, limit, payload)
+        changes = await _changes(conn, user_id, page, payload)
     finally:
         await conn.close()
     head = int(user.seq)
-    changes: list[dict[str, Any]] = []
-    used = 0
-    has_more = False
-    for row in rows:
-        if len(changes) >= limit or (changes and payload and used + int(row.size) > PAGE_BYTES):
-            has_more = True
-            break
-        used += int(row.size) if payload else 0
-        changes.append(change_from_row(row, payload))
     nxt = changes[-1]["seq"] if changes else head
     return {"changes": changes, "next": nxt, "has_more": has_more, "head": head}
 
@@ -144,18 +178,11 @@ async def list_records(
     conn = await _repeatable(engine)
     try:
         head = int((await fetchone(conn, "SELECT seq FROM users WHERE id = :u", {"u": user_id})).seq)  # type: ignore[union-attr]
-        rows = await fetchall(conn, f"SELECT {RECORD_COLS} FROM records WHERE {where} ORDER BY seq LIMIT :l", params)
+        rows = await fetchall(conn, f"SELECT {META_COLS} FROM records WHERE {where} ORDER BY seq LIMIT :l", params)
+        page, has_more = _budget(rows, limit, payload)
+        out = await _changes(conn, user_id, page, payload)
     finally:
         await conn.close()
-    out: list[dict[str, Any]] = []
-    used = 0
-    has_more = False
-    for row in rows:
-        if len(out) >= limit or (out and payload and used + int(row.size) > PAGE_BYTES):
-            has_more = True
-            break
-        used += int(row.size) if payload else 0
-        out.append(change_from_row(row, payload))
     nxt = out[-1]["seq"] if out else after
     return {"records": out, "next": nxt, "has_more": has_more, "head": head}
 
@@ -171,14 +198,21 @@ async def fetch_records(engine: AsyncEngine, user_id: uuid.UUID, items: Any) -> 
         ids.append(it["id"])
     if not items:
         return {"records": []}
-    async with engine.connect() as conn:
+    conn = await _repeatable(engine)
+    try:
         rows = await fetchall(
             conn,
-            f"SELECT {RECORD_COLS} FROM records WHERE user_id = :u AND (type, id) IN "
+            f"SELECT {META_COLS} FROM records WHERE user_id = :u AND (type, id) IN "
             "(SELECT * FROM unnest(CAST(:t AS text[]), CAST(:i AS text[]))) ORDER BY seq",
             {"u": user_id, "t": types, "i": ids},
         )
-    return {"records": [change_from_row(r, True) for r in rows]}
+        # mesmo orçamento do pull (~PAGE_BYTES, o primeiro sempre com payload); o que passar volta com
+        # `omitted: true` (§7.2) e o cliente pede de novo
+        with_env, _more = _budget(rows, len(rows), True)
+        envs = await _payloads(conn, user_id, with_env)
+    finally:
+        await conn.close()
+    return {"records": [change_from_row(r, (r.type, r.id) in envs, envs.get((r.type, r.id))) for r in rows]}
 
 
 # ---------------------------------------------------------------- parsing do push
@@ -210,7 +244,7 @@ def _bad(field: str, reason: str = "invalid", **extra: Any) -> ApiError:
     return ApiError("invalid_request", details={"field": field, "reason": reason, **extra})
 
 
-def parse_item(raw: Any, idx: int) -> Item:
+def parse_item(raw: Any, idx: int, max_record_bytes: int | None = MAX_RECORD_BYTES) -> Item:
     f = f"items[{idx}]"
     if not isinstance(raw, dict):
         raise _bad(f)
@@ -246,11 +280,11 @@ def parse_item(raw: Any, idx: int) -> Item:
         if t == "setting":
             raise _bad(f, "setting_is_never_deleted")
     else:
-        env = parse_envelope(raw.get("env"), f + ".env")
+        env = parse_envelope(raw.get("env"), f + ".env", max_bytes=max_record_bytes)
     return Item(t, rid, scope, base_rev, rev, deleted, env, list(dict.fromkeys(blobs)))
 
 
-def parse_push(body: Any, *, require_push_id: bool = True) -> PushReq:
+def parse_push(body: Any, *, require_push_id: bool = True, max_record_bytes: int | None = MAX_RECORD_BYTES) -> PushReq:
     if not isinstance(body, dict):
         raise _bad("body")
     push_id: uuid.UUID | None = None
@@ -265,7 +299,7 @@ def parse_push(body: Any, *, require_push_id: bool = True) -> PushReq:
         raise _bad("items")
     if len(items_raw) > MAX_ITEMS:
         raise _bad("items", "too_many", limit=MAX_ITEMS)
-    items = [parse_item(r, i) for i, r in enumerate(items_raw)]
+    items = [parse_item(r, i, max_record_bytes) for i, r in enumerate(items_raw)]
     keys = [(i.type, i.id) for i in items]
     if len(set(keys)) != len(keys):
         raise _bad("items", "duplicate_record")
@@ -311,9 +345,10 @@ async def _check_blobs(conn: AsyncConnection, user_id: uuid.UUID, items: list[It
 
 
 async def _load_current(conn: AsyncConnection, user_id: uuid.UUID, items: list[Item]) -> dict[tuple[str, str], Any]:
+    """Estado atual dos itens, só metadados (o payload só é lido para devolver conflitos)."""
     rows = await fetchall(
         conn,
-        f"SELECT {RECORD_COLS} FROM records WHERE user_id = :u AND (type, id) IN "
+        f"SELECT {META_COLS} FROM records WHERE user_id = :u AND (type, id) IN "
         "(SELECT * FROM unnest(CAST(:t AS text[]), CAST(:i AS text[])))",
         {"u": user_id, "t": [i.type for i in items], "i": [i.id for i in items]},
     )
@@ -356,22 +391,29 @@ async def _check_scopes(conn: AsyncConnection, user_id: uuid.UUID, items: list[I
         raise ApiError("conflict", details={"conflicts": conflicts})
 
 
-def _check_revs(items: list[Item], current: dict[tuple[str, str], Any]) -> None:
-    conflicts = []
+async def _check_revs(
+    conn: AsyncConnection, user_id: uuid.UUID, items: list[Item], current: dict[tuple[str, str], Any]
+) -> None:
+    bad = []
     for i in items:
         cur = current.get((i.type, i.id))
         cur_rev = int(cur.rev) if cur is not None else 0
         if i.base_rev != cur_rev:
-            c: dict[str, Any] = {
-                "type": i.type,
-                "id": i.id,
-                "reason": "gone" if cur is not None and cur.deleted else "rev_mismatch",
-            }
-            if cur is not None:
-                c["current"] = change_from_row(cur, True)
-            conflicts.append(c)
-    if conflicts:
-        raise ApiError("conflict", details={"conflicts": conflicts})
+            bad.append((i, cur))
+    if not bad:
+        return
+    envs = await _payloads(conn, user_id, [cur for _i, cur in bad if cur is not None])
+    conflicts = []
+    for i, cur in bad:
+        c: dict[str, Any] = {
+            "type": i.type,
+            "id": i.id,
+            "reason": "gone" if cur is not None and cur.deleted else "rev_mismatch",
+        }
+        if cur is not None:
+            c["current"] = change_from_row(cur, True, envs.get((cur.type, cur.id)))
+        conflicts.append(c)
+    raise ApiError("conflict", details={"conflicts": conflicts})
 
 
 async def _write(
@@ -401,12 +443,17 @@ async def _write(
         elif i.deleted and i.type == "memory_collection":
             cascades.append((i.id, ["memory"]))
     cascade_blobs: set[str] = set()
+    # Filhos que estão no próprio lote (ex.: memória movida para outra coleção junto com o tombstone da
+    # antiga) NÃO entram na cascata: o delta por item já os contou e o upsert abaixo os grava. Sem isso a
+    # contagem descontava o filho duas vezes e o DELETE apagava uma linha que o upsert recriava.
+    not_batch = " AND (type, id) NOT IN (SELECT * FROM unnest(CAST(:bt AS text[]), CAST(:bi AS text[])))"
+    batch_keys = {"bt": [i.type for i in items], "bi": [i.id for i in items]}
     for scope, types in cascades:
         agg = await fetchone(
             conn,
             "SELECT count(*) FILTER (WHERE NOT deleted) AS n, COALESCE(sum(size) FILTER (WHERE NOT deleted), 0) AS b "
-            "FROM records WHERE user_id = :u AND scope_id = :s AND type = ANY(CAST(:t AS text[]))",
-            {"u": user_id, "s": scope, "t": types},
+            "FROM records WHERE user_id = :u AND scope_id = :s AND type = ANY(CAST(:t AS text[]))" + not_batch,
+            {"u": user_id, "s": scope, "t": types, **batch_keys},
         )
         assert agg is not None
         rec_delta -= int(agg.n)
@@ -440,14 +487,15 @@ async def _write(
             conn,
             "SELECT DISTINCT rb.blob_id FROM record_blobs rb JOIN records r ON r.user_id = rb.user_id "
             "AND r.type = rb.type AND r.id = rb.record_id WHERE r.user_id = :u AND r.scope_id = :s "
-            "AND r.type = ANY(CAST(:t AS text[]))",
-            {"u": user_id, "s": scope, "t": types},
+            "AND r.type = ANY(CAST(:t AS text[])) "
+            "AND (r.type, r.id) NOT IN (SELECT * FROM unnest(CAST(:bt AS text[]), CAST(:bi AS text[])))",
+            {"u": user_id, "s": scope, "t": types, **batch_keys},
         )
         cascade_blobs.update(r.blob_id for r in rows)
         await execute(
             conn,
-            "DELETE FROM records WHERE user_id = :u AND scope_id = :s AND type = ANY(CAST(:t AS text[]))",
-            {"u": user_id, "s": scope, "t": types},
+            "DELETE FROM records WHERE user_id = :u AND scope_id = :s AND type = ANY(CAST(:t AS text[]))" + not_batch,
+            {"u": user_id, "s": scope, "t": types, **batch_keys},
         )
         if types == ["session", "message"]:
             await execute(
@@ -548,7 +596,9 @@ async def _write(
     push_bytes = sum(len(i.env.ct) for i in items if i.env)
     await execute(
         conn,
-        "UPDATE users SET usage_records = usage_records + :rd, usage_record_bytes = usage_record_bytes + :bd WHERE id = :u",
+        # GREATEST: os CHECK (>= 0) da 0002 transformariam deriva antiga em 500; `recompute-usage` conserta
+        "UPDATE users SET usage_records = GREATEST(usage_records + :rd, 0), "
+        "usage_record_bytes = GREATEST(usage_record_bytes + :bd, 0) WHERE id = :u",
         {"u": user_id, "rd": rec_delta, "bd": bytes_delta},
     )
     await execute(
@@ -606,8 +656,9 @@ async def push(
     can_host: bool,
     body: Any,
     is_online: IsOnline,
+    max_record_bytes: int | None = MAX_RECORD_BYTES,
 ) -> PushOutcome:
-    req = parse_push(body)
+    req = parse_push(body, max_record_bytes=max_record_bytes)
     try:
         async with engine.begin() as conn:
             user = await lock_user(conn, user_id)
@@ -688,7 +739,7 @@ async def _push_tx(
             become_host.append(chat_id)  # modo (B) replay: chat sem host → quem enviou vira host
 
     current = await _load_current(conn, user_id, items)
-    _check_revs(items, current)
+    await _check_revs(conn, user_id, items, current)
     changes, head, chat_heads = await _write(conn, user, device_id, items, current)
 
     events: list[tuple[str, dict[str, Any]]] = []
@@ -770,6 +821,7 @@ async def resolve_divergence(
     chat_id: str,
     body: Any,
     is_online: IsOnline,
+    max_record_bytes: int | None = MAX_RECORD_BYTES,
 ) -> ResolveOutcome:
     if not isinstance(body, dict):
         raise _bad("body")
@@ -783,7 +835,11 @@ async def resolve_divergence(
     items_raw = body.get("items")
     if keep == "online" and items_raw:
         raise _bad("items", "must_be_empty_for_keep_online")
-    req = parse_push({"push_id": body.get("push_id"), "items": items_raw or []}, require_push_id=False)
+    req = parse_push(
+        {"push_id": body.get("push_id"), "items": items_raw or []},
+        require_push_id=False,
+        max_record_bytes=max_record_bytes,
+    )
     for it in req.items:
         ok = (it.type in CONTENT and it.scope == chat_id) or (it.type == "chat" and it.id == chat_id and not it.deleted)
         if not ok:
@@ -820,7 +876,7 @@ async def resolve_divergence(
                 await _check_blobs(conn, user_id, req.items)
                 await _check_scopes(conn, user_id, req.items)
                 current = await _load_current(conn, user_id, req.items)
-                _check_revs(req.items, current)
+                await _check_revs(conn, user_id, req.items, current)
                 changes, _head, heads = await _write(conn, user, device_id, req.items, current)
                 new_head = heads.get(chat_id, new_head)
                 resp = {"results": _results(changes), "head": _head, "chat_heads": {chat_id: new_head}}

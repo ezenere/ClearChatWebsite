@@ -31,16 +31,23 @@ export async function passwordKek(
 ): Promise<Bytes> {
   checkKdfParams(k, allowTest)
   if (salt.length !== 16) throw new Error('salt precisa de 16 bytes')
-  const out = await argon2id({
-    password: utf8(password.normalize('NFC')),
-    salt,
-    parallelism: k.p,
-    iterations: k.t,
-    memorySize: k.m,
-    hashLength: k.len,
-    outputType: 'binary'
-  })
-  return new Uint8Array(out)
+  const pw = utf8(password.normalize('NFC'))
+  try {
+    const out = await argon2id({
+      password: pw,
+      salt,
+      parallelism: k.p,
+      iterations: k.t,
+      memorySize: k.m,
+      hashLength: k.len,
+      outputType: 'binary'
+    })
+    const kek = new Uint8Array(out)
+    out.fill(0)
+    return kek
+  } finally {
+    pw.fill(0)
+  }
 }
 
 /** Base32 Crockford (MSB primeiro) — usado só na chave de recuperação. */

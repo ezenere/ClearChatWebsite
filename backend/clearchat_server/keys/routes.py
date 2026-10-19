@@ -12,12 +12,16 @@ from ..auth.tokens import Principal
 from ..context import AppContext, get_ctx, request_ip
 from ..db import execute, fetchone
 from ..errors import ApiError
+from ..ratelimit import HOUR, Limit
 from ..security import ct_equal, sha256
 from ..services.accounts import log_activity, wipe_user_data
 from ..sync.envelope import parse_b64_len, parse_kdf, parse_wrap
 from ..util import b64u_encode
 
 router = APIRouter()
+
+# troca de wrap (senha ou recuperação) é rara e iniciada pelo dono: 10/h por conta (§17.3)
+KEYS_CHANGE_PER_HOUR = 10
 
 
 def keys_response(u: Any) -> dict[str, Any] | None:
@@ -126,6 +130,7 @@ async def keys_setup(
 
 
 async def _replace_slot(request: Request, p: Principal, ctx: AppContext, slot: str) -> Any:
+    await ctx.limiter.hit([Limit(f"keys_change:user:{p.user_id}", KEYS_CHANGE_PER_HOUR, HOUR)])
     body = await _body(request)
     if not isinstance(body, dict):
         raise ApiError("invalid_request")

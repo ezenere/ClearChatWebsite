@@ -21,12 +21,12 @@ from ..services.accounts import log_activity, revoke_devices
 from ..util import normalize_email, utcnow, valid_email
 from .codes import issue_code, request_limits, verify_code
 from .deps import current_principal
-from .tokens import Principal, create_device, issue_tokens
+from .tokens import Principal, create_device, find_reused_refresh, issue_tokens
 from .turnstile import verify_turnstile
 
 router = APIRouter()
 
-PLATFORM_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+PLATFORM_RE = re.compile(r"\A[a-z0-9_-]{1,32}\Z")
 REFRESH_COOKIE = "cc_refresh"
 
 
@@ -140,6 +140,13 @@ async def _invite_row(conn: Any, token: Any, email: str | None) -> Any:
     return row
 
 
+# Códigos fantasmas: quando nenhum e-mail com código é enviado (login de conta inexistente ou banida,
+# cadastro de conta existente), um código aleatório é gravado mesmo assim e nunca enviado. Só erros contra
+# um código vivo contam para o bloqueio do verify (codes.verify_code); sem o fantasma, chegar (ou não) ao
+# bloqueio revelaria se a conta existe. Ninguém conhece o fantasma, e as rotas de verify recusam o uso dele
+# (conta inexistente/banida no login, conta já existente no cadastro) com o mesmo `code_invalid`.
+
+
 # ---------------------------------------------------------------- convites
 @router.get("/auth/invite/{token}")
 async def invite_info(token: str, ctx: AppContext = Depends(get_ctx)) -> Any:
@@ -183,10 +190,12 @@ async def signup_start(request: Request, background: BackgroundTasks, ctx: AppCo
             background.add_task(
                 ctx.mailer.send, code_mail(email, code, "signup", inst.instance_name, ctx.settings.email_code_ttl_s)
             )
-        elif user.status == "active":
-            login_url = f"{ctx.settings.public_base_url}/login"
-            background.add_task(ctx.mailer.send, existing_account_mail(email, inst.instance_name, login_url))
-        # conta banida: nada é enviado (resposta idêntica)
+        else:
+            if user.status == "active":
+                login_url = f"{ctx.settings.public_base_url}/login"
+                background.add_task(ctx.mailer.send, existing_account_mail(email, inst.instance_name, login_url))
+            # conta banida: nada é enviado (resposta idêntica)
+            await issue_code(conn, ctx, email, "signup", ip=ip)  # código fantasma (ver "Códigos fantasmas")
     return {"ok": True}
 
 
@@ -256,6 +265,8 @@ async def code_request(request: Request, background: BackgroundTasks, ctx: AppCo
             background.add_task(
                 ctx.mailer.send, code_mail(email, code, "login", inst.instance_name, ctx.settings.email_code_ttl_s)
             )
+        else:
+            await issue_code(conn, ctx, email, "login", ip=ip)  # código fantasma (ver "Códigos fantasmas")
     return {"ok": True}
 
 
@@ -301,12 +312,8 @@ async def refresh(request: Request, ctx: AppContext = Depends(get_ctx)) -> Respo
             {"h": h},
         )
         reused = None
-        if dev is None:
-            reused = await fetchone(
-                conn,
-                "SELECT id, user_id FROM devices WHERE refresh_prev_hash = :h AND revoked_at IS NULL",
-                {"h": h},
-            )
+        if dev is None:  # algum refresh já rotacionado deste dispositivo (qualquer geração)?
+            reused = await find_reused_refresh(conn, h)
     if dev is None:
         if reused is not None:
             async with ctx.engine.begin() as conn:
@@ -341,6 +348,8 @@ async def refresh(request: Request, ctx: AppContext = Depends(get_ctx)) -> Respo
 
 
 async def _after_revoke(ctx: AppContext, user_id: uuid.UUID, device_ids: list[uuid.UUID], chats: list[str]) -> None:
+    # revogado nunca mais conecta: os host.revoked guardados para ele saem da memória
+    ctx.coordinator.forget_devices(device_ids)
     for d in device_ids:
         ctx.hub.close_device(d, 4403, "device_revoked")
     if chats:

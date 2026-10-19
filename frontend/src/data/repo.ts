@@ -14,6 +14,33 @@ export interface BrokenEntry {
   error: string
 }
 
+/**
+ * Contexto que o cliente pediu. A AAD do registro amarra tipo/id/escopo, mas é remontada a partir dos
+ * rótulos que o próprio servidor devolve — então o registro também precisa bater com o pedido, senão o
+ * servidor poderia servir um registro autêntico de outro chat/id no lugar do pedido (§3.10).
+ * `id`/`scope` ausentes = não restringe.
+ */
+export interface RecordContext {
+  type: string
+  id?: string
+  scope?: string | null
+}
+
+export class RecordContextError extends Error {
+  constructor() {
+    super('registro fora do contexto pedido')
+    this.name = 'RecordContextError'
+  }
+}
+
+export function matchesContext(c: Change, ctx: RecordContext): boolean {
+  return (
+    c.type === ctx.type &&
+    (ctx.id === undefined || c.id === ctx.id) &&
+    (ctx.scope === undefined || (c.scope ?? null) === ctx.scope)
+  )
+}
+
 const PAGE = 500
 
 export class Repo {
@@ -40,21 +67,53 @@ export class Repo {
     return out.filter((c) => !c.deleted)
   }
 
-  /** Busca o payload dos registros que vieram com `omitted: true`. */
+  /**
+   * Busca o payload dos registros que vieram com `omitted: true`. O `/records/fetch` também corta a resposta
+   * em ~8 MiB (§7.2): o que não coube volta `omitted: true` de novo e é pedido outra vez, até não sobrar
+   * nenhum. O servidor sempre devolve ao menos o primeiro com payload; rodada sem progresso encerra (o que
+   * faltar fica sem payload → broken).
+   */
   async fillOmitted(changes: Change[]): Promise<Change[]> {
-    const missing = changes.filter((c) => c.omitted || !c.env)
-    if (!missing.length) return changes
+    const key = (c: { type: string; id: string }) => `${c.type}|${c.id}`
+    let want = [
+      ...new Map(
+        changes.filter((c) => c.omitted || !c.env).map((c) => [key(c), { type: c.type, id: c.id }])
+      ).values()
+    ]
+    if (!want.length) return changes
     const byKey = new Map<string, Change>()
-    for (let i = 0; i < missing.length; i += 500) {
-      const { records } = await this.api.fetchRecords(
-        missing.slice(i, i + 500).map((c) => ({ type: c.type, id: c.id }))
-      )
-      for (const r of records) byKey.set(`${r.type}|${r.id}`, r)
+    for (let round = 0; want.length && round < 10_000; round++) {
+      const again: { type: string; id: string }[] = []
+      let filled = 0
+      for (let i = 0; i < want.length; i += 500) {
+        const batch = want.slice(i, i + 500)
+        const asked = new Set(batch.map(key))
+        const { records } = await this.api.fetchRecords(batch)
+        for (const r of records) {
+          const k = key(r)
+          if (!asked.has(k)) continue // não foi pedido nesta leva
+          asked.delete(k)
+          if (r.omitted && !r.env) {
+            again.push({ type: r.type, id: r.id })
+          } else {
+            byKey.set(k, r)
+            filled++
+          }
+        }
+      }
+      if (!filled) break
+      want = again
     }
-    return changes.map((c) => byKey.get(`${c.type}|${c.id}`) ?? c)
+    // só substitui pelo registro do mesmo tipo/id/escopo; senão fica o original (sem payload → broken)
+    return changes.map((c) => {
+      const r = byKey.get(`${c.type}|${c.id}`)
+      return r && matchesContext(r, { type: c.type, id: c.id, scope: c.scope ?? null }) ? r : c
+    })
   }
 
-  async decrypt<T>(c: Change): Promise<T> {
+  /** Decifra. Com `expected`, recusa (RecordContextError) registro de outro tipo/id/escopo. */
+  async decrypt<T>(c: Change, expected?: RecordContext): Promise<T> {
+    if (expected && !matchesContext(c, expected)) throw new RecordContextError()
     if (!c.env) throw new Error('registro sem conteúdo')
     return (await openRecord(this.sk.record, this.userId, c, c.env)) as T
   }
@@ -70,14 +129,16 @@ export class Repo {
     await Promise.all(
       changes.map(async (change) => {
         try {
-          entries.push({ change, plain: await this.decrypt<T>(change) })
+          entries.push({ change, plain: await this.decrypt<T>(change, { type, scope }) })
         } catch (e) {
           broken.push({
             change,
             error:
               e instanceof UnsupportedEnvelopeError
                 ? 'formato de uma versão mais nova do app — atualize o site'
-                : 'não foi possível decifrar'
+                : e instanceof RecordContextError
+                  ? 'registro fora do contexto pedido (ignorado)'
+                  : 'não foi possível decifrar'
           })
         }
       })
@@ -135,8 +196,11 @@ export class Repo {
         if (c.reason === 'gone' || c.current?.deleted)
           throw new Error('Este item foi apagado em outro dispositivo.', { cause: e })
         if (c.reason !== 'rev_mismatch' || !c.current) throw e
+        // a versão "atual" do conflito precisa ser o MESMO registro; senão o plaintext de outro seria
+        // re-selado sob ref.id
+        if (!matchesContext(c.current, ref)) throw e
         baseRev = c.current.rev
-        current = await this.decrypt<T>(await this.ensurePayload(c.current))
+        current = await this.decrypt<T>(await this.ensurePayload(c.current), ref)
       }
     }
     throw new Error('Não foi possível salvar: o item mudou várias vezes seguidas. Tente de novo.')

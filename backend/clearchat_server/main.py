@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -41,6 +42,13 @@ from .util import client_ip
 
 log = logging.getLogger("clearchat.api")
 
+# o token de convite vai no caminho (GET /api/v1/auth/invite/{token}): nunca para o log
+_INVITE_PATH_RE = re.compile(r"(/api/v1/auth/invite/)[^/]+")
+
+
+def redact_path(path: str | None) -> str | None:
+    return _INVITE_PATH_RE.sub(r"\1***", path) if path else path
+
 
 class ClientIPMiddleware:
     """Resolve o IP real (TRUSTED_PROXY_CIDRS) para HTTP e WebSocket e registra as requisições."""
@@ -76,7 +84,7 @@ class ClientIPMiddleware:
                 "http",
                 extra={
                     "method": scope.get("method"),
-                    "path": scope.get("path"),  # sem query string
+                    "path": redact_path(scope.get("path")),  # sem query string nem token de convite
                     "status": status["code"],
                     "ms": round((time.monotonic() - start) * 1000, 1),
                     "ip": ip,
@@ -103,6 +111,9 @@ def create_app(
         setup_logging(settings.log_level, settings.log_format)
     if not settings.server_secret or len(settings.server_secret) < 16:
         raise RuntimeError("SERVER_SECRET ausente ou curto demais (gere com `openssl rand -base64 48`)")
+    if "*" in settings.cors_origins:
+        # o CORS da api vai com credenciais (cookie do refresh): curinga liberaria qualquer site
+        raise RuntimeError("ALLOWED_ORIGINS='*' não é permitido (CORS com credenciais): liste as origens exatas")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

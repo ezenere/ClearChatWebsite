@@ -4,7 +4,7 @@ import { useState, type FormEvent } from 'react'
 import { ExternalLink, Save } from 'lucide-react'
 import { toast } from '../../components/toast'
 import { Alert, Badge, Button, Card, Field, PasswordInput, Spinner } from '../../components/ui'
-import type { Entry } from '../../data/repo'
+import { matchesContext, type Entry } from '../../data/repo'
 import {
   API_ENGINES,
   type ApiEngineId,
@@ -37,14 +37,22 @@ export default function Search() {
       { type: 'setting', id: 'webSearchApiKeys' },
       { type: 'setting', id: 'webSearchEngines' }
     ])
-    const full = await repo.fillOmitted(records.filter((r) => !r.deleted))
+    // só os settings pedidos: registro de outro tipo/id/escopo devolvido pelo servidor é ignorado
+    const wanted = ['webSearchApiKeys', 'webSearchEngines'].map((id) => ({
+      type: 'setting',
+      id,
+      scope: null
+    }))
+    const full = await repo.fillOmitted(
+      records.filter((r) => !r.deleted && wanted.some((w) => matchesContext(r, w)))
+    )
     const out: { keys: Entry<SettingPlain<WebSearchApiKeys>> | null; engines: EngineCfg[] | null } =
       {
         keys: null,
         engines: null
       }
     for (const c of full) {
-      const plain = await repo.decrypt<SettingPlain>(c)
+      const plain = await repo.decrypt<SettingPlain>(c, { type: 'setting', id: c.id, scope: null })
       if (c.id === 'webSearchApiKeys')
         out.keys = { change: c, plain: plain as SettingPlain<WebSearchApiKeys> }
       if (c.id === 'webSearchEngines' && Array.isArray(plain.value))

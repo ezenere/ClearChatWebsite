@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -55,10 +55,20 @@ async def issue_tokens(
     device_id: uuid.UUID,
     rotate_from: bytes | None = None,
 ) -> dict[str, Any]:
-    """Cria um access token novo e um refresh novo (o anterior vira `refresh_prev_hash`)."""
+    """Cria um access token novo e um refresh novo. O refresh que sai (`rotate_from`) entra no histórico
+    de rotação do dispositivo (`device_refresh_history`, até a validade dele): apresentá-lo de novo é reuso
+    (§5.4), qualquer que seja a geração."""
     access = new_token("cca_")
     refresh = new_token("ccr_")
     now = utcnow()
+    if rotate_from is not None:
+        await execute(
+            conn,
+            "INSERT INTO device_refresh_history (token_hash, device_id, expires_at) "
+            "SELECT :h, id, COALESCE(refresh_expires_at, :e) FROM devices WHERE id = :d "
+            "ON CONFLICT (token_hash) DO NOTHING",
+            {"h": rotate_from, "d": device_id, "e": now + timedelta(days=settings.refresh_token_ttl_days)},
+        )
     await execute(
         conn,
         "INSERT INTO access_tokens (token_hash, device_id, user_id, expires_at) VALUES (:h, :d, :u, :e)",
@@ -85,6 +95,21 @@ async def issue_tokens(
         "refresh_token": refresh,
         "refresh_expires_in": settings.refresh_token_ttl_days * 86400,
     }
+
+
+async def find_reused_refresh(conn: AsyncConnection, h: bytes) -> Any:
+    """Dispositivo não revogado cujo histórico de rotação contém este hash (reuso de refresh), ou None."""
+    return await fetchone(
+        conn,
+        "SELECT d.id, d.user_id FROM device_refresh_history r JOIN devices d ON d.id = r.device_id "
+        "WHERE r.token_hash = :h AND d.revoked_at IS NULL",
+        {"h": h},
+    )
+
+
+async def prune_refresh_history(conn: AsyncConnection, now: datetime) -> int:
+    """GC: apaga do histórico de rotação os refresh que já teriam expirado de qualquer jeito."""
+    return await execute(conn, "DELETE FROM device_refresh_history WHERE expires_at < :t", {"t": now})
 
 
 async def authenticate(conn: AsyncConnection, token: str | None) -> Principal:

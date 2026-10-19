@@ -1,5 +1,7 @@
 """Hub de WebSocket: registro device_id → conexão (uma por dispositivo), fila de envio por conexão com
-backpressure (> 1000 mensagens ou 8 MiB → fecha 4429), inscrições por chat."""
+backpressure (> 1000 mensagens ou 8 MiB → fecha 4429), inscrições por chat. Fechar com 4403 (revogação,
+conta banida/apagada, chaves zeradas) marca a conexão como revogada: o que ela ainda tem na fila de
+requisições não roda mais (ws.py)."""
 
 from __future__ import annotations
 
@@ -42,6 +44,7 @@ class Conn:
         self.subscriptions: set[str] = set()
         self.last_frame_at = time.monotonic()
         self.closed = False
+        self.revoked = False
         self._buf: deque[str] = deque()
         self._bytes = 0
         self._wake = asyncio.Event()
@@ -51,10 +54,18 @@ class Conn:
 
     # ---------- envio ----------
     def send(self, msg: dict[str, Any] | str) -> None:
+        self._enqueue(msg if isinstance(msg, str) else json_dumps(msg), front=False)
+
+    def send_front(self, msg: dict[str, Any]) -> None:
+        self._enqueue(json_dumps(msg), front=True)
+
+    def _enqueue(self, s: str, front: bool) -> None:
         if self.closed or self._close is not None:
             return
-        s = msg if isinstance(msg, str) else json_dumps(msg)
-        self._buf.append(s)
+        if front:
+            self._buf.appendleft(s)
+        else:
+            self._buf.append(s)
         self._bytes += len(s)
         if len(self._buf) > MAX_QUEUE_MSGS or self._bytes > MAX_QUEUE_BYTES:
             log.warning("fila de envio estourou; fechando 4429", extra={"device_id": str(self.device_id)})
@@ -63,14 +74,12 @@ class Conn:
             self._close = (4429, "rate_limited")
         self._wake.set()
 
-    def send_front(self, msg: dict[str, Any]) -> None:
-        s = json_dumps(msg)
-        self._buf.appendleft(s)
-        self._bytes += len(s)
-        self._wake.set()
-
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
+
+    @property
+    def started(self) -> bool:
+        return self._task is not None
 
     async def _run(self) -> None:
         try:
@@ -172,11 +181,15 @@ class Hub:
         for c in self.user_conns(user_id):
             if final is not None:
                 c.send(final)
+            if code == 4403:
+                c.revoked = True
             c.close(code, reason)
 
     def close_device(self, device_id: uuid.UUID, code: int, reason: str = "") -> None:
         c = self.by_device.get(device_id)
         if c is not None:
+            if code == 4403:
+                c.revoked = True
             c.close(code, reason)
 
     async def close_all(self, code: int = 1001, reason: str = "server_restart") -> None:

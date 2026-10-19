@@ -36,6 +36,15 @@ describe('utilitários', () => {
     expect(safeNext('//evil.com')).toBe('/app')
     expect(safeNext('https://evil.com')).toBe('/app')
     expect(safeNext(null)).toBe('/app')
+    expect(safeNext('/app/chats/abc?x=1#y')).toBe('/app/chats/abc?x=1#y')
+    // o parser de URL descarta TAB/LF/CR: "/\t/host" viraria "//host"
+    expect(safeNext('/\t/evil.com')).toBe('/app')
+    expect(safeNext('/\n/evil.com')).toBe('/app')
+    expect(safeNext('/\r/evil.com')).toBe('/app')
+    expect(safeNext('/\u0000/evil.com')).toBe('/app')
+    expect(safeNext('/ /evil.com')).toBe('/app')
+    expect(safeNext('/\\evil.com')).toBe('/app')
+    expect(safeNext('/app\u00a0x')).toBe('/app')
   })
   it('formatação', () => {
     expect(formatBytes(0)).toBe('0 B')

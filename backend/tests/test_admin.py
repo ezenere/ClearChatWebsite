@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import random
 import re
 import secrets
 
@@ -170,3 +171,81 @@ async def test_create_user_invites_and_settings(make_server, admin):
     r = await admin.post(f"/invites/{invite_id}/revoke")
     assert r.status_code == 303
     assert (await srv.http.get(f"/api/v1/auth/invite/{token}")).json() == {"valid": False}
+
+
+# consulta antiga da visão geral (subconsultas por dia): a nova DEVE devolver exatamente o mesmo
+OLD_DASHBOARD_DAYS_SQL = (
+    "WITH d AS (SELECT generate_series(current_date - 13, current_date, interval '1 day')::date AS day) "
+    "SELECT d.day, "
+    "(SELECT count(*) FROM activity a WHERE a.kind = 'login' AND a.at::date = d.day) AS logins, "
+    "(SELECT count(*) FROM activity a WHERE a.kind = 'signup' AND a.at::date = d.day) AS signups, "
+    "(SELECT count(*) FROM activity a WHERE a.kind IN ('login_failed', 'refresh_reused') "
+    "  AND a.at::date = d.day) AS failures, "
+    "(SELECT COALESCE(sum(pushes), 0) FROM usage_daily u WHERE u.day = d.day) AS pushes, "
+    "(SELECT COALESCE(sum(blob_uploads), 0) FROM usage_daily u WHERE u.day = d.day) AS uploads, "
+    "(SELECT count(DISTINCT user_id) FROM usage_daily u WHERE u.day = d.day) AS active "
+    "FROM d ORDER BY d.day DESC"
+)
+
+
+async def test_dashboard_days_query_unchanged(make_server, admin):
+    from clearchat_admin.main import DASHBOARD_DAYS_SQL
+
+    srv = await make_server()
+    users = [(await srv.signup()).user_id for _ in range(3)]
+    kinds = ["login", "signup", "login_failed", "refresh_reused", "logout", "password_changed", "keys_setup"]
+    rnd = random.Random(7)
+    async with admin.app.state.engine.begin() as c:
+        for _ in range(400):
+            # de 20 dias atrás a 2 dias no futuro, com horários perto da meia-noite também
+            at_sql = "date_trunc('day', now()) - make_interval(days => :d) + make_interval(secs => :s)"
+            await c.execute(
+                text(f"INSERT INTO activity (user_id, kind, at) VALUES (:u, :k, {at_sql})"),
+                {
+                    "u": rnd.choice([*users, None]),
+                    "k": rnd.choice(kinds),
+                    "d": rnd.randint(-2, 20),
+                    "s": rnd.choice([0, 1, 43200, 86399, rnd.uniform(0, 86400)]),
+                },
+            )
+        for u in users:
+            for d in range(-1, 18):
+                if rnd.random() < 0.6:
+                    await c.execute(
+                        text(
+                            "INSERT INTO usage_daily (user_id, day, pushes, blob_uploads) "
+                            "VALUES (:u, current_date - CAST(:d AS integer), :p, :b) "
+                            "ON CONFLICT (user_id, day) DO UPDATE SET pushes = EXCLUDED.pushes"
+                        ),
+                        {"u": u, "d": d, "p": rnd.randint(0, 50), "b": rnd.randint(0, 5)},
+                    )
+    async with admin.app.state.engine.connect() as c:
+        for tz in ("UTC", "America/Sao_Paulo", "Asia/Tokyo"):
+            await c.execute(text(f"SET TIME ZONE '{tz}'"))
+            old = [tuple(r) for r in (await c.execute(text(OLD_DASHBOARD_DAYS_SQL))).all()]
+            new = [tuple(r) for r in (await c.execute(text(DASHBOARD_DAYS_SQL))).all()]
+            assert len(new) == 14 and new == old, tz
+            assert sum(r[1] + r[2] + r[3] for r in new) > 0
+        await c.rollback()
+    await admin.login()
+    r = await admin.client.get("/")
+    assert r.status_code == 200
+
+
+async def test_admin_cookie_secure_only_over_https(tmp_path):
+    async def login_cookie(settings, base):
+        app = create_admin_app(settings, mailer=Mailer(settings))
+        async with app.router.lifespan_context(app):
+            async with app.state.engine.begin() as c:
+                await c.execute(text("DELETE FROM rate_counters"))
+            client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base)
+            r = await client.post("/login", data={"token": TOKEN})
+            await client.aclose()
+            assert r.status_code == 303
+            return r.headers["set-cookie"]
+
+    # http (túnel SSH / rede local): sem Secure, senão o navegador descartaria o cookie
+    assert "secure" not in (await login_cookie(make_settings(tmp_path), "http://localhost:8190")).lower()
+    # atrás de um proxy TLS (ADMIN_HTTPS=true) ou com TLS direto: Secure
+    assert "secure" in (await login_cookie(make_settings(tmp_path, admin_https=True), "http://localhost:8190")).lower()
+    assert "secure" in (await login_cookie(make_settings(tmp_path), "https://localhost:8190")).lower()

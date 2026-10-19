@@ -165,6 +165,9 @@ async def test_push_requires_blobs_and_gc(srv):
     assert out["blobs"] == 1
     assert (await srv.http.get(f"/api/v1/blobs/{b1}", headers=s.h)).status_code == 200
     assert (await srv.http.get(f"/api/v1/blobs/{b2}", headers=s.h)).status_code == 404
+    # o arquivo do órfão sai do disco junto (unlink numa thread, fora do event loop)
+    assert not srv.ctx.blobs.path(s.user_id, b2).exists()
+    assert srv.ctx.blobs.path(s.user_id, b1).exists()
     # apagar o chat solta a referência; depois da tolerância o blob vai embora
     r = await srv.push(s, [chat("c1", base_rev=1, deleted=True)])
     assert r.status_code == 200

@@ -17,6 +17,7 @@ def main() -> None:
     import uvicorn
 
     from .main import create_app
+    from .realtime.ws import WS_MAX_FRAME
 
     ap = argparse.ArgumentParser(prog="clearchat_server serve")
     ap.add_argument("serve", nargs="?")
@@ -40,7 +41,8 @@ def main() -> None:
         port=args.port,
         workers=1,
         proxy_headers=False,  # o IP real é resolvido pelo middleware (TRUSTED_PROXY_CIDRS)
-        ws_max_size=16 * 1024 * 1024,
+        # limite do protocolo (4 MiB por frame, §10.1) + folga; acima disso o uvicorn fecha com 1009
+        ws_max_size=WS_MAX_FRAME + 64 * 1024,
         ws_ping_interval=None,  # heartbeat é do protocolo (ping/pong de aplicação)
         log_config=None,
         timeout_graceful_shutdown=10,

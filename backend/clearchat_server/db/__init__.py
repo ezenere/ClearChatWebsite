@@ -14,7 +14,10 @@ ALEMBIC_DIR = Path(__file__).parent / "alembic"
 
 
 def make_engine(url: str, pool_size: int = 10) -> AsyncEngine:
-    return create_async_engine(url, pool_size=pool_size, max_overflow=pool_size, pool_pre_ping=True)
+    # hide_parameters: erros do SQLAlchemy não levam os valores dos parâmetros (hashes, e-mails, wraps) ao log
+    return create_async_engine(
+        url, pool_size=pool_size, max_overflow=pool_size, pool_pre_ping=True, hide_parameters=True
+    )
 
 
 async def fetchone(conn: AsyncConnection, sql: str, params: Mapping[str, Any] | None = None) -> Row[Any] | None:

@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.0.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
+> **Versão do protocolo: 1.1.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -526,8 +526,8 @@ navegador em `<base>/signup?from=app`.
 ### 5.4 Sessões por dispositivo
 
 - `access_token`: opaco, 32 bytes aleatórios, prefixo `cca_`, TTL 1 h. `refresh_token`: prefixo `ccr_`,
-  TTL 60 dias deslizante, **rotacionado a cada uso**; reutilizar um refresh antigo revoga o dispositivo
-  (detecção de roubo). Servidor guarda só `SHA-256(token)`.
+  TTL 60 dias deslizante, **rotacionado a cada uso**; reutilizar um refresh antigo — qualquer geração já
+  rotacionada, enquanto ainda estaria válido — revoga o dispositivo (detecção de roubo). Servidor guarda só `SHA-256(token)`.
 - Apps: tokens no corpo JSON; `Authorization: Bearer cca_…`. Desktop guarda o refresh com `safeStorage`.
 - Site (`client: "web"`): o refresh vai num cookie `cc_refresh` `HttpOnly; SameSite=Strict;
   Path=<caminho de base>/api/v1/auth` (+ `Secure` quando `<base>` é `https`); o access fica em memória.
@@ -580,7 +580,7 @@ Clientes chamam antes de login (validação do servidor escolhido) e a cada cone
 (landing, "Criar conta", captcha).
 ```json
 { "name": "ClearChat", "server_version": "0.1.0", "base_url": "https://clear.ezenere.com",
-  "protocol": { "min": 1, "max": 1, "version": "1.0.0" },
+  "protocol": { "min": 1, "max": 1, "version": "1.1.0" },
   "features": {
     "signupOpen": true,
     "captcha": { "provider": "turnstile", "siteKey": "0x4AAAA…" },
@@ -661,7 +661,7 @@ O servidor valida formato (salt 16 bytes, `n` 12, `c` 48, `kdf` dentro dos limit
 | `GET /sync/changes?since=<seq>&limit=<n>&payload=1` | feed de mudanças (§7.3) |
 | `POST /sync/push` | push atômico (§7.4) |
 | `GET /records?type=<t>&scope=<id>&after=<seq>&limit=<n>&payload=1` | estado atual (sem tombstones), paginado por `seq` → `{ records: [Change], next, has_more, head }` (mesma paginação do feed: repetir com `after=next`) — usado pelo site, mobile, resync e resolução de divergência |
-| `POST /records/fetch` | `{ items: [{ type, id }] }` (≤ 500) → `{ records: [Change] }` (payload de registros omitidos) |
+| `POST /records/fetch` | `{ items: [{ type, id }] }` (≤ 500) → `{ records: [Change] }` (payload de registros omitidos; ~8 MiB por resposta, o resto volta `omitted: true` — §7.2) |
 | `GET /chat-states?since=<ssq>` | estados de host/divergência dos chats (§8.2), incremental por `ssq` → `{ chat_states: [ChatState], state_cursor }` |
 | `POST /chats/{chat_id}/divergence/resolve` | resolução de divergência (§9) → `{ state: ChatState }` (+ `results`, `head`, `chat_heads` como no push, em `keep: 'local'` com itens) |
 
@@ -692,7 +692,9 @@ Change = { seq: number, type: string, id: string, scope: string | null, rev: num
            env?: Envelope, omitted?: true, size: number, blobs: string[], device_id: string, updated_at: string }
 ```
 `omitted: true` = o payload não veio (página grande, `payload=0` ou evento ao vivo grande): buscar com
-`POST /records/fetch` (ou `sync.fetch` no WS).
+`POST /records/fetch` (ou `sync.fetch` no WS). O `fetch` obedece ao mesmo orçamento de ~8 MiB por resposta
+(o primeiro registro, em ordem de `seq`, sempre vem com payload): os que não couberem voltam de novo com
+`omitted: true`, e o cliente DEVE pedi-los outra vez até não restar nenhum.
 
 ### 7.3 Pull
 
@@ -813,6 +815,12 @@ Por usuário, no servidor (nulo = ilimitado, que é o padrão hoje): `quota_reco
 `413 quota_exceeded` com `details: { kind, used, limit }`. O cliente mostra o aviso e para de enviar
 (continua puxando).
 
+`kind`: `record_bytes` · `records` · `blob_bytes` · `devices` · `chat_states`. `chat_states` é o teto de
+estados de chat (§8.2) por usuário, definido pelo servidor (não é editável por usuário): só é checado quando
+`host.begin`, `host.takeover` ou `host.pin` criaria a linha de um chat que ainda não tem estado — chats que
+já têm estado seguem normalmente. O servidor PODE apagar estados ociosos de chats sem registro (sem host,
+janela, troca nem divergência). Clientes que não conhecem um `kind` DEVEM tratá-lo como cota genérica.
+
 ---
 
 ## 8. Host de execução (quem roda o chat)
@@ -900,6 +908,7 @@ Transições (normativas):
    - Host = D e `epoch` confere → abre a janela (idempotente se já aberta por D). Resposta traz `head`:
      o cliente DEVE ter `cursor ≥ head` antes de rodar (senão puxa primeiro).
    - Host ≠ D → `not_host` (com o estado). Troca pendente para outro dispositivo → `handover_pending`.
+   - Chat ainda sem estado e o usuário no teto de estados → `413 quota_exceeded` (`kind: 'chat_states'`, §7.10).
 2. **`host.end`** `{chat_id, epoch}`: fecha a janela. O host DEVE ter recebido ack de todo o conteúdo
    do turno antes (outbox do chat vazia). Se houver troca pendente, a resposta traz `handover_pending: true`
    e o host DEVE fazer `host.release` em seguida.
@@ -1015,7 +1024,8 @@ expiração nem entrega na reconexão.
 
 `host.takeover { chat_id, mode: 'next_turn' | 'force', confirm_pinned: boolean }` pelo dispositivo N:
 
-- N sem `can_host` → `cannot_host`; divergente → `chat_diverged`; `pinned && !confirm_pinned` → `host_pinned`.
+- N sem `can_host` → `cannot_host`; divergente → `chat_diverged`; `pinned && !confirm_pinned` → `host_pinned`;
+  chat ainda sem estado com o usuário no teto de estados → `quota_exceeded` (`kind: 'chat_states'`, §7.10).
 - **Host offline / sem host** → concedido na hora: `host = N`, `epoch+1`, janela fechada; N recebe
   `host.granted {epoch, head}`.
 - **Host em `grace`** → troca pendente; se o host voltar, recebe o pedido; se expirar, concede a N.
@@ -1054,7 +1064,8 @@ expiração nem entrega na reconexão.
 - Mobile (`can_host`) DEVERIA recusar ser host de chats com ferramentas locais.
 - **Fixar host** (`host.pin {chat_id, pinned}`), por chat, qualquer dispositivo: com o host fixado,
   "Rodar aqui" fica escondido atrás de "Executar neste dispositivo mesmo assim…" e o servidor exige
-  `confirm_pinned: true` no `host.takeover`. Visível em `ChatState.pinned` (selo de cadeado).
+  `confirm_pinned: true` no `host.takeover`. Visível em `ChatState.pinned` (selo de cadeado). Como
+  `host.begin`/`host.takeover`, pode criar o estado do chat e cair no teto (`quota_exceeded`, `kind: 'chat_states'`).
 
 ---
 
@@ -1174,9 +1185,9 @@ Depois do `welcome`, o servidor já transmite eventos ao vivo; o cliente puxa de
 | `hello` | §10.3 | `welcome` |
 | `ping` | `ts?` | `pong` (sem `re` obrigatório) |
 | `sync.pull` | `since, limit?, payload?` | `{ changes, next, has_more, head }` |
-| `sync.fetch` | `items: [{type, id}]` | `{ records: [Change] }` |
+| `sync.fetch` | `items: [{type, id}]` | `{ records: [Change] }` (~8 MiB; pedir de novo os `omitted`, §7.2) |
 | `sync.push` | corpo do push (§7.4) | resposta do push |
-| `host.begin` | `chat_id, epoch \| null, purpose: 'run'\|'edit'\|'replay'` | `{ epoch, head, became_host }` |
+| `host.begin` | `chat_id, epoch \| null, purpose: 'run'\|'edit'\|'replay'` | `{ epoch, head, became_host }` (`host.begin`, `host.takeover` e `host.pin` podem dar `quota_exceeded` `kind: 'chat_states'`, §7.10) |
 | `host.end` | `chat_id, epoch` | `{ handover_pending: boolean }` |
 | `host.takeover` | `chat_id, mode: 'next_turn'\|'force', confirm_pinned` | `{ status: 'granted'\|'pending', epoch?, head? }` |
 | `host.handover_cancel` | `chat_id` | `{}` |
@@ -1700,7 +1711,8 @@ sequenceDiagram
 ### 17.2 Cotas
 
 `users.quota_record_bytes`, `quota_records`, `quota_blob_bytes`, `quota_devices`: `NULL` = ilimitado
-(padrão). Editáveis no painel admin. Erro: `413 quota_exceeded`.
+(padrão). Editáveis no painel admin. Erro: `413 quota_exceeded`. Além delas, um teto de estados de chat por
+usuário vale para a instância toda (`kind: 'chat_states'`, §7.10).
 
 ### 17.3 Limites anti-abuso (aplicação, contadores no Postgres; Nginx na frente — ver ARCHITECTURE.md)
 
@@ -1709,14 +1721,19 @@ sequenceDiagram
 | `code/request` + `signup/start` por e-mail | 5/h e 10/24 h |
 | idem por IP | 20/h e 100/24 h |
 | `code/verify` por código | 5 tentativas |
-| `code/verify` por e-mail / por IP | 10/h / 30/h |
-| bloqueio por e-mail | 15 falhas (≈ 3 códigos queimados) em 24 h → 1 h; reincidência dobra até 24 h |
+| `code/verify` por e-mail + rede do cliente (IPv4 /24, IPv6 /64) | 10/h |
+| `code/verify` por e-mail (teto, somando todas as redes) / por IP | 200/h / 30/h |
+| bloqueio por e-mail + rede do cliente | 15 erros contra um código vivo (≈ 3 códigos queimados) em 24 h → 1 h; reincidência dobra até 24 h. Tentativa sem código vivo (inexistente, usado, expirado ou esgotado) não conta |
 | `auth/refresh` por dispositivo | 60/h |
 | conexões WS por usuário | 30/min |
 | `reauth/request` por conta | 5/h |
+| troca de wrap (`PUT /keys/password` + `PUT /keys/recovery`) por conta | 10/h |
 
 Contadores por e-mail usam `HMAC(SERVER_SECRET, email)` e valem também para e-mails inexistentes —
-responder `429` não revela se a conta existe.
+responder `429` não revela se a conta existe. Por isso, quando nenhum código é enviado (login sem conta ou
+com conta banida, cadastro de conta existente), o servidor DEVERIA gravar mesmo assim um código que nunca é
+enviado, para o bloqueio se comportar igual. Limites e bloqueio por rede do cliente impedem que terceiros
+gastem o limite do dono do e-mail ou o bloqueiem.
 
 ### 17.4 Códigos de erro
 
@@ -1750,7 +1767,7 @@ responder `429` não revela se a conta existe.
 | `handover_pending` | 409 | troca de host em andamento |
 | `cursor_expired` | 410 | `since` abaixo do piso de tombstones |
 | `payload_too_large` | 413 | lote/frame grande demais |
-| `quota_exceeded` | 413 | cota (`details.kind/used/limit`) |
+| `quota_exceeded` | 413 | cota (`details.kind/used/limit`; `kind`: `record_bytes`\|`records`\|`blob_bytes`\|`devices`\|`chat_states` — §7.10) |
 | `protocol_unsupported` | 426 | versão do protocolo fora da faixa |
 | `rate_limited` | 429 | limites (`Retry-After`) |
 | `internal` | 500 | erro inesperado |
@@ -1776,6 +1793,7 @@ responder `429` não revela se a conta existe.
 | Versão | Data | Mudança |
 |---|---|---|
 | 1.0.0 | 2026-10-19 | Contrato inicial (cripto, registros, REST, WebSocket, host de execução, divergência, merge, skills, anexos, instância/self-host, gateway reservado). |
+| 1.1.0 | 2026-10-19 | Adições compatíveis: `quota_exceeded` com `details.kind: 'chat_states'` — teto de estados de chat por usuário em `host.begin`/`host.takeover`/`host.pin` ao criar o estado de um chat (§7.10, §8.3, §8.8, §8.9, §10.4, §17.2, §17.4); `records/fetch`/`sync.fetch` com o orçamento de ~8 MiB por resposta, o cliente pede de novo os `omitted: true` até acabarem (§6.7, §7.2, §10.4). Texto: §17.3 — `code/verify` limitado por e-mail + rede do cliente (teto de 200/h por e-mail), bloqueio contando só erros contra um código vivo, código não enviado para o bloqueio não revelar contas, limite de 10/h para troca de wrap; §5.4 — reuso vale para qualquer refresh já rotacionado. |
 
 ---
 

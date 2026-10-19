@@ -22,11 +22,15 @@ from ..ratelimit import Limit
 from ..sync import records
 from ..sync.routes import after_push, payload_flag
 from ..util import client_ip, iso, utcnow
+from .coordinator import access_error, revoked_reason
 from .hub import Conn
 
 log = logging.getLogger("clearchat.ws")
 
 WS_MAX_FRAME = 4 * 1024 * 1024
+# fila de requisições por conexão (como a fila de envio do hub): acima disso → fecha 4429
+WS_MAX_PENDING = 128
+WS_MAX_PENDING_BYTES = 16 * 1024 * 1024
 CLOSE_PROTOCOL = 4000
 CLOSE_UNSUPPORTED = 4001
 CLOSE_HELLO_TIMEOUT = 4002
@@ -63,9 +67,22 @@ async def h_fetch(ctx: AppContext, c: Conn, d: dict[str, Any]) -> dict[str, Any]
 
 
 async def h_push(ctx: AppContext, c: Conn, d: dict[str, Any]) -> dict[str, Any]:
+    # defesa em profundidade: revogação/ban já gravados barram o push mesmo antes do 4403 chegar aqui
+    async with ctx.engine.connect() as conn:
+        reason = await revoked_reason(conn, c.device_id)
+    if reason is not None:
+        raise access_error(reason)
     body = {k: v for k, v in d.items() if k not in ("t", "id")}
     try:
-        outcome = await records.push(ctx.engine, c.user_id, c.device_id, c.can_host, body, ctx.hub.is_online)
+        outcome = await records.push(
+            ctx.engine,
+            c.user_id,
+            c.device_id,
+            c.can_host,
+            body,
+            ctx.hub.is_online,
+            max_record_bytes=ctx.settings.record_max_bytes,
+        )
     except ApiError as e:
         for st in e.broadcast:
             ctx.coordinator.broadcast_state(c.user_id, st)
@@ -107,10 +124,47 @@ async def _dispatch(ctx: AppContext, c: Conn, handler: Handler, msg: dict[str, A
         c.send(_error_frame(re, ApiError("internal")))
 
 
-async def _worker(ctx: AppContext, c: Conn, q: asyncio.Queue[tuple[Handler, dict[str, Any]] | None]) -> None:
-    while True:
-        item = await q.get()
+class _Inbox:
+    """Fila de requisições de uma conexão (o worker roda uma por vez, em ordem), limitada em quantidade e
+    bytes. O sentinela de fim fica fora do limite: `finish()` nunca falha."""
+
+    def __init__(self) -> None:
+        self._q: asyncio.Queue[tuple[Handler, dict[str, Any], int] | None] = asyncio.Queue()
+        self.bytes = 0
+
+    def put(self, handler: Handler, msg: dict[str, Any], size: int) -> bool:
+        """False se estourou o limite (quem chama fecha 4429)."""
+        if self._q.qsize() >= WS_MAX_PENDING or self.bytes + size > WS_MAX_PENDING_BYTES:
+            return False
+        self.bytes += size
+        self._q.put_nowait((handler, msg, size))
+        return True
+
+    async def get(self) -> tuple[Handler, dict[str, Any]] | None:
+        item = await self._q.get()
         if item is None:
+            return None
+        self.bytes -= item[2]
+        return item[0], item[1]
+
+    def discard(self) -> int:
+        """Joga fora o que ainda não começou (nunca teve ack: o cliente reenvia do outbox)."""
+        n = 0
+        while not self._q.empty():
+            if self._q.get_nowait() is not None:
+                n += 1
+        self.bytes = 0
+        return n
+
+    def finish(self) -> None:
+        self._q.put_nowait(None)
+
+
+async def _worker(ctx: AppContext, c: Conn, inbox: _Inbox) -> None:
+    while True:
+        item = await inbox.get()
+        # revogado (4403): o que ainda estava na fila não roda mais
+        if item is None or c.revoked:
             return
         await _dispatch(ctx, c, item[0], item[1])
 
@@ -170,9 +224,19 @@ async def ws_endpoint(ws: WebSocket) -> None:
     old = ctx.hub.register(c)
     if old is not None:
         old.close(CLOSE_SUPERSEDED, "superseded")
-    queue: asyncio.Queue[tuple[Handler, dict[str, Any]] | None] = asyncio.Queue()
+    inbox = _Inbox()
+    overflow = False
     tasks: list[asyncio.Task[None]] = []
     try:
+        # uma revogação gravada entre o authenticate e o register não achou este socket no hub: confere de
+        # novo agora que ele está lá (o que vier depois disto chega pelo close_device/close_user)
+        async with ctx.engine.connect() as conn:
+            reason = await revoked_reason(conn, p.device_id)
+        if reason is not None:
+            c.revoked = True
+            log.info("ws recusado: acesso revogado durante o hello", extra={"device_id": str(p.device_id)})
+            await _close(ws, CLOSE_FORBIDDEN, reason)
+            return
         resumed, lost, after = await ctx.coordinator.on_connect(c, hello.get("active_windows"))
         state_cursor = hello.get("state_cursor")
         if not isinstance(state_cursor, int) or isinstance(state_cursor, bool) or state_cursor < 0:
@@ -209,18 +273,23 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if isinstance(subs, list) and subs:
             with contextlib.suppress(ApiError):
                 await ctx.coordinator.stream_subscribe(c, subs)
-        tasks.append(asyncio.create_task(_worker(ctx, c, queue)))
+        tasks.append(asyncio.create_task(_worker(ctx, c, inbox)))
         tasks.append(asyncio.create_task(_watchdog(ctx, c)))
         log.info("ws conectado", extra={"user_id": str(p.user_id), "device_id": str(p.device_id)})
 
         while True:
             msg = await ws.receive()
-            if msg.get("type") == "websocket.disconnect":
+            # revogado: nada mais do que chegar é tratado (o 4403 já está a caminho)
+            if msg.get("type") == "websocket.disconnect" or c.revoked:
                 break
             c.last_frame_at = time.monotonic()
             text = msg.get("text")
             if text is None:
                 c.send(_error_frame(None, ApiError("invalid_request", details={"reason": "binary_frame"})))
+                continue
+            if len(text) > WS_MAX_FRAME:
+                # antes do parse (o frame grande nem é decodificado); sem `re`, porque o id não foi lido
+                c.send(_error_frame(None, ApiError("payload_too_large", details={"limit": WS_MAX_FRAME})))
                 continue
             try:
                 data = json.loads(text)
@@ -231,9 +300,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 c.send(_error_frame(None, ApiError("invalid_request")))
                 continue
             t = data["t"]
-            if len(text) > WS_MAX_FRAME:
-                c.send(_error_frame(data.get("id"), ApiError("payload_too_large", details={"limit": WS_MAX_FRAME})))
-                continue
             if t == "ping":
                 pong: dict[str, Any] = {"t": "pong"}
                 if "id" in data:
@@ -248,8 +314,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     c.send(_error_frame(None, ApiError("invalid_request", details={"reason": "missing_id", "t": t})))
                 elif t in INLINE:
                     await _dispatch(ctx, c, INLINE[t], data)
-                else:
-                    queue.put_nowait((HANDLERS[t], data))
+                elif not inbox.put(HANDLERS[t], data, len(text)):
+                    log.warning("fila de requisições estourou; fechando 4429", extra={"device_id": str(c.device_id)})
+                    overflow = True
+                    c.close(CLOSE_RATE, "rate_limited")
+                    break
             else:
                 c.send(
                     _error_frame(
@@ -259,17 +328,25 @@ async def ws_endpoint(ws: WebSocket) -> None:
     except Exception:
         log.exception("erro na conexão WebSocket")
     finally:
-        queue.put_nowait(None)
+        revoked = c.revoked
+        if revoked or overflow:
+            # nunca tiveram ack: o cliente reenvia do outbox (revogado não reenvia nada)
+            inbox.discard()
+        inbox.finish()
         if len(tasks) > 1:
             tasks[1].cancel()  # watchdog
+        # revogado sai do hub já, sem esperar a requisição em andamento
+        was_current = ctx.hub.unregister(c) if revoked else False
         for t_ in tasks:
             # o worker termina a requisição em andamento (ex.: um push) antes de sair
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(t_, 30)
-        was_current = ctx.hub.unregister(c)
+        if not revoked:
+            was_current = ctx.hub.unregister(c)
         c.close(1000)
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(c.done.wait(), 1)
+        if c.started:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(c.done.wait(), 1)
         await c.stop()
         if was_current:
             try:

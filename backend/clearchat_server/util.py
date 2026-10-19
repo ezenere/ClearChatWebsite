@@ -12,12 +12,13 @@ from typing import Any
 
 from .config import Settings
 
-RECORD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-TYPE_RE = re.compile(r"^[a-z_]{1,32}$")
-BLOB_ID_RE = re.compile(r"^[0-9a-f]{64}$")
-HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-B64U_RE = re.compile(r"^[A-Za-z0-9_-]*$")
-EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,253}\.[^@\s]{1,63}$")
+# \A…\Z (e não ^…$): "$" aceita um "\n" no fim, e um id/tipo/e-mail com quebra de linha passaria
+RECORD_ID_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
+TYPE_RE = re.compile(r"\A[a-z_]{1,32}\Z")
+BLOB_ID_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+HEX64_RE = re.compile(r"\A[0-9a-fA-F]{64}\Z")
+B64U_RE = re.compile(r"\A[A-Za-z0-9_-]*\Z")
+EMAIL_RE = re.compile(r"\A[^@\s]{1,64}@[^@\s]{1,253}\.[^@\s]{1,63}\Z")
 
 
 def utcnow() -> datetime:

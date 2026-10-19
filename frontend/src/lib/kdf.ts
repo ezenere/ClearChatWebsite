@@ -13,8 +13,11 @@ function getWorker(): Worker | null {
       const p = pending.get(ev.data.id)
       if (!p) return
       pending.delete(ev.data.id)
-      if (ev.data.kek) p.resolve(new Uint8Array(ev.data.kek))
-      else p.reject(new Error(ev.data.error ?? 'falha no Argon2id'))
+      if (ev.data.kek) {
+        // cópia própria; zera a recebida do worker (quem usa a KEK zera a cópia depois)
+        p.resolve(new Uint8Array(ev.data.kek))
+        ev.data.kek.fill(0)
+      } else p.reject(new Error(ev.data.error ?? 'falha no Argon2id'))
     }
     worker.onerror = () => {
       for (const p of pending.values()) p.reject(new Error('worker falhou'))

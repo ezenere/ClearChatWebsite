@@ -1,6 +1,8 @@
 # segredos
 .env
 *.env.local
+*.pem
+*.key
 
 # node
 node_modules/

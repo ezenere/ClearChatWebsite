@@ -50,7 +50,8 @@ async def _json_body(request: Request, limit: int) -> Any:
     clen = request.headers.get("content-length")
     if clen is not None and clen.isdigit() and int(clen) > limit:
         raise ApiError("payload_too_large", details={"limit": limit})
-    raw = b""
+    # bytearray: acumular em `bytes` copia o buffer inteiro a cada pedaço (custo quadrático no nº de pedaços)
+    raw = bytearray()
     async for chunk in request.stream():
         raw += chunk
         if len(raw) > limit:
@@ -80,7 +81,15 @@ async def sync_push(
 ) -> Any:
     body = await _json_body(request, PUSH_MAX_BYTES)
     try:
-        outcome = await records.push(ctx.engine, p.user_id, p.device_id, p.can_host, body, ctx.hub.is_online)
+        outcome = await records.push(
+            ctx.engine,
+            p.user_id,
+            p.device_id,
+            p.can_host,
+            body,
+            ctx.hub.is_online,
+            max_record_bytes=ctx.settings.record_max_bytes,
+        )
     except ApiError as e:
         for st in e.broadcast:
             ctx.coordinator.broadcast_state(p.user_id, st)
@@ -136,7 +145,14 @@ async def divergence_resolve(
         raise ApiError("invalid_request", details={"field": "chat_id"})
     body = await _json_body(request, PUSH_MAX_BYTES)
     out = await records.resolve_divergence(
-        ctx.engine, p.user_id, p.device_id, p.can_host, chat_id, body, ctx.hub.is_online
+        ctx.engine,
+        p.user_id,
+        p.device_id,
+        p.can_host,
+        chat_id,
+        body,
+        ctx.hub.is_online,
+        max_record_bytes=ctx.settings.record_max_bytes,
     )
     if out.changes:
         ctx.hub.send_user(

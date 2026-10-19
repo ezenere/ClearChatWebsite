@@ -1,5 +1,5 @@
 // Conversas: lista (título, atualização, tamanho) e conteúdo (sessões + mensagens) de um chat.
-import type { Repo, Entry, BrokenEntry } from './repo'
+import { matchesContext, type Repo, type Entry, type BrokenEntry } from './repo'
 import type { ChatPlain, MessagePlain, SessionPlain } from './schemas'
 
 export interface ChatSummary {
@@ -55,17 +55,19 @@ export interface ChatView {
 }
 
 export async function loadChat(repo: Repo, chatId: string): Promise<ChatView | null> {
+  // o registro do chat tem escopo = o próprio id (§4.2); outro chat devolvido pelo servidor é ignorado
+  const chatCtx = { type: 'chat', id: chatId, scope: chatId }
   const [chats, sessions, messages] = await Promise.all([
     repo.fillOmitted(
       (await repo.api.fetchRecords([{ type: 'chat', id: chatId }])).records.filter(
-        (c) => !c.deleted
+        (c) => !c.deleted && matchesContext(c, chatCtx)
       )
     ),
     repo.listDecrypted<SessionPlain>('session', chatId),
     repo.listDecrypted<MessagePlain>('message', chatId)
   ])
   if (!chats.length) return null
-  const chat = { change: chats[0], plain: await repo.decrypt<ChatPlain>(chats[0]) }
+  const chat = { change: chats[0], plain: await repo.decrypt<ChatPlain>(chats[0], chatCtx) }
   const bySession = new Map<string, Entry<MessagePlain>[]>()
   for (const m of messages.entries) {
     const list = bySession.get(m.plain.sessionId) ?? []

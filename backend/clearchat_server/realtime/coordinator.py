@@ -1,15 +1,18 @@
 """Coordenação de host por chat (§8): janela de escrita, queda com tolerância, troca de host
 (next_turn / force com timeout), fixar host, comandos remotos em trânsito (sem fila guardada) e relay
-do stream ao vivo (§11). Estado durável em `chat_states`; timers e comandos em trânsito em memória."""
+do stream ao vivo (§11). Estado durável em `chat_states`; timers e comandos em trânsito em memória.
+Queda, reinício e fim de tolerância trabalham em conjunto (O(1) comandos e um timer por usuário), nunca
+chat a chat."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -17,9 +20,18 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from ..chatstate import ensure_state, host_status, load_state, lock_state, lock_user, next_ssq, serialize
+from ..chatstate import (
+    STATE_SELECT,
+    ensure_state,
+    host_status,
+    load_state,
+    lock_state,
+    lock_user,
+    next_ssq,
+    serialize,
+)
 from ..config import Settings
-from ..db import execute, fetchall, fetchone
+from ..db import execute, fetchall, fetchone, fetchval
 from ..errors import ApiError
 from ..sync.envelope import parse_envelope
 from ..util import RECORD_ID_RE, iso, utcnow
@@ -49,6 +61,8 @@ COMMAND_KINDS = {
 COMMAND_MAX_BYTES = 1024 * 1024
 STREAM_MAX_BYTES = 256 * 1024
 STREAM_MAX_RATE = 50  # eventos/s por chat (acima disso o servidor descarta)
+REVOKE_QUEUE_MAX = 5000  # host.revoked guardados por dispositivo offline (acima, os mais antigos saem)
+SWEEP = "*"  # chave dos timers por usuário (não casa com RECORD_ID_RE: nunca colide com um chat_id)
 
 # colunas que o coordenador pode alterar (nomes internos, nunca vindos do cliente)
 STATE_COLS = {
@@ -104,6 +118,26 @@ def _env_size_ok(env: Any, limit: int) -> None:
         raise ApiError("payload_too_large", details={"limit": limit})
 
 
+async def revoked_reason(conn: AsyncConnection, device_id: uuid.UUID) -> str | None:
+    """Motivo do 4403 se o dispositivo/conta perdeu o acesso depois do hello; None = segue valendo."""
+    row = await fetchone(
+        conn,
+        "SELECT d.revoked_at, u.status FROM devices d JOIN users u ON u.id = d.user_id WHERE d.id = :d",
+        {"d": device_id},
+    )
+    if row is None:  # conta apagada (os dispositivos vão junto)
+        return "account_deleted"
+    if row.revoked_at is not None:
+        return "device_revoked"
+    if row.status != "active":
+        return "account_disabled"
+    return None
+
+
+def access_error(reason: str) -> ApiError:
+    return ApiError("device_revoked" if reason == "device_revoked" else "account_disabled")
+
+
 class Coordinator:
     def __init__(self, engine: AsyncEngine, hub: Hub, settings: Settings) -> None:
         self.engine = engine
@@ -112,7 +146,10 @@ class Coordinator:
         self.grace_timers: dict[tuple[uuid.UUID, str], asyncio.Task[None]] = {}
         self.force_timers: dict[tuple[uuid.UUID, str], asyncio.Task[None]] = {}
         self.pending: dict[tuple[uuid.UUID, str], PendingCommand] = {}
-        self.pending_revocations: dict[uuid.UUID, list[dict[str, Any]]] = defaultdict(list)
+        # device_id → (user_id, chat_id → host.revoked): um por chat, para quando o dispositivo voltar
+        self.pending_revocations: dict[uuid.UUID, tuple[uuid.UUID, dict[str, dict[str, Any]]]] = {}
+        # ("grace" | "force", user_id) → quando vence o timer de varredura do usuário (time.monotonic)
+        self._sweep_due: dict[tuple[str, uuid.UUID], float] = {}
         self._stream_rate: dict[tuple[uuid.UUID, str], deque[float]] = {}
         self._closing = False
 
@@ -164,6 +201,17 @@ class Coordinator:
                 details["diverged"] = st["diverged"]
         return ApiError(code, details=details)
 
+    async def _assert_active(self, conn: AsyncConnection, c: Conn) -> None:
+        """Defesa em profundidade: revogação/ban já gravados barram o pedido mesmo que o 4403 ainda não
+        tenha chegado ao socket (requisição em andamento, NOTIFY perdido)."""
+        reason = await revoked_reason(conn, c.device_id)
+        if reason is not None:
+            raise access_error(reason)
+
+    async def _ensure(self, conn: AsyncConnection, user_id: uuid.UUID, chat_id: str) -> Any:
+        """ensure_state com o teto de chat_states por usuário (só ao criar uma linha nova)."""
+        return await ensure_state(conn, user_id, chat_id, cap=self.settings.max_chat_states_per_user or None)
+
     async def _chat_deleted(self, conn: AsyncConnection, user_id: uuid.UUID, chat_id: str) -> bool:
         row = await fetchone(
             conn,
@@ -199,48 +247,99 @@ class Coordinator:
 
         timers[key] = asyncio.create_task(runner())
 
-    def _revoke_msg(self, device_id: uuid.UUID, msg: dict[str, Any]) -> None:
-        """host.revoked agora (se online) ou na próxima conexão."""
-        if not self.hub.send_device(device_id, msg):
-            lst = self.pending_revocations[device_id]
-            lst[:] = [m for m in lst if m.get("chat_id") != msg.get("chat_id")] + [msg]
+    def _schedule_sweep(self, kind: str, user_id: uuid.UUID, delay: float) -> None:
+        """Um timer de varredura por usuário (não por chat). Se já houver um que vence antes, ele fica: a
+        varredura reagenda sozinha para o próximo prazo."""
+        timers, fn = (
+            (self.grace_timers, self._grace_sweep) if kind == "grace" else (self.force_timers, self._force_sweep)
+        )
+        key = (user_id, SWEEP)
+        due = time.monotonic() + max(0.0, delay)
+        cur = self._sweep_due.get((kind, user_id))
+        if key in timers and cur is not None and cur <= due:
+            return
+        self._sweep_due[(kind, user_id)] = due
+        self._schedule(timers, key, delay, fn)
+
+    def _revoke_msg(self, user_id: uuid.UUID, device_id: uuid.UUID, msg: dict[str, Any]) -> None:
+        """host.revoked agora (se online) ou na próxima conexão (o último por chat; no máximo
+        REVOKE_QUEUE_MAX por dispositivo)."""
+        if self.hub.send_device(device_id, msg):
+            return
+        _, q = self.pending_revocations.setdefault(device_id, (user_id, {}))
+        q.pop(msg["chat_id"], None)  # o mais novo vai para o fim
+        q[msg["chat_id"]] = msg
+        if len(q) > REVOKE_QUEUE_MAX:
+            q.pop(next(iter(q)))
 
     async def _grant(
         self, conn: AsyncConnection, user_id: uuid.UUID, st: Any, new_host: uuid.UUID, reason: str, post: Post
     ) -> dict[str, Any]:
         """Concede o host a `new_host` (epoch+1, janela fechada, troca limpa)."""
-        old = st.host_device_id
-        state = await self._update(
+        ssq = await next_ssq(conn, user_id)
+        (state,) = await self._grant_many(conn, user_id, [(st, new_host, ssq)], reason, post)
+        return state
+
+    async def _grant_many(
+        self,
+        conn: AsyncConnection,
+        user_id: uuid.UUID,
+        grants: list[tuple[Any, uuid.UUID, int]],
+        reason: str,
+        post: Post,
+    ) -> list[dict[str, Any]]:
+        """Concede o host de vários chats num UPDATE só: `grants` = (linha travada, novo host, ssq já
+        reservado). Devolve os ChatStates na mesma ordem e põe em `post` as ações de cada um."""
+        now = utcnow()
+        chats = [st.chat_id for st, _, _ in grants]
+        await execute(
             conn,
-            user_id,
-            st.chat_id,
+            "UPDATE chat_states cs SET host_device_id = v.h, epoch = cs.epoch + 1, window_purpose = NULL, "
+            "window_since = NULL, host_dropped_at = v.dr, host_grace_deadline = NULL, handover_to = NULL, "
+            "handover_mode = NULL, handover_requested_at = NULL, handover_deadline = NULL, ssq = v.s, "
+            "updated_at = now() "
+            "FROM unnest(CAST(:c AS text[]), CAST(:h AS uuid[]), CAST(:dr AS timestamptz[]), CAST(:s AS bigint[])) "
+            "AS v(chat_id, h, dr, s) WHERE cs.user_id = :u AND cs.chat_id = v.chat_id",
             {
-                "host_device_id": new_host,
-                "epoch": EPOCH_INC,
-                "window_purpose": None,
-                "window_since": None,
-                "host_dropped_at": None if self.hub.is_online(new_host) else utcnow(),
-                "host_grace_deadline": None,
-                "handover_to": None,
-                "handover_mode": None,
-                "handover_requested_at": None,
-                "handover_deadline": None,
+                "u": user_id,
+                "c": chats,
+                "h": [h for _, h, _ in grants],
+                "dr": [None if self.hub.is_online(h) else now for _, h, _ in grants],
+                "s": [s for _, _, s in grants],
             },
-            {"kind": "host_changed", "device_id": str(new_host), "reason": reason},
         )
-        key = (user_id, st.chat_id)
-        epoch, head, chat_id = state["epoch"], state["head"], st.chat_id
+        rows = await fetchall(
+            conn,
+            STATE_SELECT + "WHERE cs.user_id = :u AND cs.chat_id = ANY(CAST(:c AS text[]))",
+            {"u": user_id, "c": chats},
+        )
+        by_chat = {r.chat_id: r for r in rows}
+        states: list[dict[str, Any]] = []
+        for st, new_host, _ in grants:
+            state = serialize(
+                by_chat[st.chat_id],
+                self.hub.is_online,
+                {"kind": "host_changed", "device_id": str(new_host), "reason": reason},
+            )
+            states.append(state)
+            post.append(self._after_grant(user_id, st.host_device_id, new_host, state, reason))
+        return states
+
+    def _after_grant(
+        self, user_id: uuid.UUID, old: uuid.UUID | None, new_host: uuid.UUID, state: dict[str, Any], reason: str
+    ) -> Callable[[], None]:
+        chat_id, epoch, head = state["chat_id"], state["epoch"], state["head"]
 
         def after() -> None:
-            self._cancel(self.grace_timers, key)
-            self._cancel(self.force_timers, key)
+            self._cancel(self.force_timers, (user_id, chat_id))
             self.broadcast_state(user_id, state)
             self.hub.send_device(new_host, {"t": "host.granted", "chat_id": chat_id, "epoch": epoch, "head": head})
             if old is not None and old != new_host:
-                self._revoke_msg(old, {"t": "host.revoked", "chat_id": chat_id, "epoch": epoch, "reason": reason})
+                self._revoke_msg(
+                    user_id, old, {"t": "host.revoked", "chat_id": chat_id, "epoch": epoch, "reason": reason}
+                )
 
-        post.append(after)
-        return state
+        return after
 
     # ------------------------------------------------------------------ host.begin / end
     async def host_begin(self, c: Conn, data: dict[str, Any]) -> dict[str, Any]:
@@ -252,9 +351,10 @@ class Coordinator:
         post: Post = []
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
+            await self._assert_active(conn, c)
             if await self._chat_deleted(conn, c.user_id, chat_id):
                 raise ApiError("not_found", details={"chat_id": chat_id})
-            st = await ensure_state(conn, c.user_id, chat_id)
+            st = await self._ensure(conn, c.user_id, chat_id)
             if st.divergence_id is not None:
                 raise await self._err(conn, "chat_diverged", c.user_id, chat_id)
             became = False
@@ -335,9 +435,10 @@ class Coordinator:
         post: Post = []
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
+            await self._assert_active(conn, c)
             if await self._chat_deleted(conn, c.user_id, chat_id):
                 raise ApiError("not_found", details={"chat_id": chat_id})
-            st = await ensure_state(conn, c.user_id, chat_id)
+            st = await self._ensure(conn, c.user_id, chat_id)
             if not c.can_host:
                 raise await self._err(conn, "cannot_host", c.user_id, chat_id)
             if st.divergence_id is not None:
@@ -488,7 +589,7 @@ class Coordinator:
             raise ApiError("invalid_request", details={"field": "pinned"})
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
-            await ensure_state(conn, c.user_id, chat_id)
+            await self._ensure(conn, c.user_id, chat_id)
             state = await self._update(
                 conn,
                 c.user_id,
@@ -536,6 +637,21 @@ class Coordinator:
                 "ORDER BY chat_id FOR UPDATE",
                 {"u": c.user_id, "d": c.device_id, "c": list(claimed)},
             )
+            ho = {
+                st.handover_to
+                for st in rows
+                if st.host_device_id == c.device_id and st.handover_to is not None and st.handover_to != c.device_id
+            }
+            names: dict[uuid.UUID, str] = {}
+            if ho:
+                names = {
+                    r.id: r.name
+                    for r in await fetchall(
+                        conn, "SELECT id, name FROM devices WHERE id = ANY(CAST(:d AS uuid[]))", {"d": list(ho)}
+                    )
+                }
+            # mudanças de cada chat: (chat_id, limpa a queda, fecha a janela, prazo da troca forçada, evento)
+            changes: list[tuple[str, bool, bool, Any, dict[str, Any] | None]] = []
             for st in rows:
                 if st.host_device_id != c.device_id:
                     if st.chat_id in claimed:
@@ -544,10 +660,11 @@ class Coordinator:
                             {"t": "host.revoked", "chat_id": st.chat_id, "epoch": int(st.epoch), "reason": "takeover"}
                         )
                     continue
-                sets: dict[str, Any] = {}
+                clear_drop = close_window = False
+                deadline = None
                 event: dict[str, Any] | None = None
                 if st.host_dropped_at is not None or st.host_grace_deadline is not None:
-                    sets.update(host_dropped_at=None, host_grace_deadline=None)
+                    clear_drop = True
                     event = {"kind": "host_back", "device_id": str(c.device_id)}
                 window_open = st.window_purpose is not None
                 if st.chat_id in claimed:
@@ -556,41 +673,67 @@ class Coordinator:
                     else:
                         lost.append(st.chat_id)
                         if window_open:
-                            sets.update(window_purpose=None, window_since=None)
+                            close_window = True
                             event = event or {"kind": "turn_ended", "device_id": str(c.device_id)}
                 elif window_open:
-                    sets.update(window_purpose=None, window_since=None)
+                    close_window = True
                     event = event or {"kind": "turn_ended", "device_id": str(c.device_id)}
                 if st.handover_to is not None and st.handover_to != c.device_id:
-                    deadline_needed = st.handover_mode == "force" and st.handover_deadline is None
-                    if deadline_needed:
-                        sets["handover_deadline"] = utcnow() + timedelta(seconds=self.settings.handover_force_timeout_s)
+                    if st.handover_mode == "force" and st.handover_deadline is None:
+                        deadline = utcnow() + timedelta(seconds=self.settings.handover_force_timeout_s)
                         force_keys.append((c.user_id, st.chat_id))
-                    to = await fetchone(conn, "SELECT name FROM devices WHERE id = :d", {"d": st.handover_to})
                     after_welcome.append(
                         {
                             "t": "host.handover_request",
                             "chat_id": st.chat_id,
                             "epoch": int(st.epoch),
                             "to_device_id": str(st.handover_to),
-                            "to_name": to.name if to else "",
+                            "to_name": names.get(st.handover_to, ""),
                             "mode": st.handover_mode,
                         }
                     )
-                if sets:
-                    states.append(await self._update(conn, c.user_id, st.chat_id, sets, event))
+                if clear_drop or close_window or deadline is not None:
+                    changes.append((st.chat_id, clear_drop, close_window, deadline, event))
+            if changes:
+                # tudo num UPDATE (O(1) comandos por conexão): ssq em sequência na ordem de chat_id, como antes
+                first = await next_ssq(conn, c.user_id, len(changes))
+                await execute(
+                    conn,
+                    "UPDATE chat_states cs SET "
+                    "host_dropped_at = CASE WHEN v.cd THEN NULL ELSE cs.host_dropped_at END, "
+                    "host_grace_deadline = CASE WHEN v.cd THEN NULL ELSE cs.host_grace_deadline END, "
+                    "window_purpose = CASE WHEN v.cw THEN NULL ELSE cs.window_purpose END, "
+                    "window_since = CASE WHEN v.cw THEN NULL ELSE cs.window_since END, "
+                    "handover_deadline = COALESCE(v.hd, cs.handover_deadline), ssq = v.s, updated_at = now() "
+                    "FROM unnest(CAST(:c AS text[]), CAST(:cd AS boolean[]), CAST(:cw AS boolean[]), "
+                    "CAST(:hd AS timestamptz[]), CAST(:s AS bigint[])) AS v(chat_id, cd, cw, hd, s) "
+                    "WHERE cs.user_id = :u AND cs.chat_id = v.chat_id",
+                    {
+                        "u": c.user_id,
+                        "c": [ch[0] for ch in changes],
+                        "cd": [ch[1] for ch in changes],
+                        "cw": [ch[2] for ch in changes],
+                        "hd": [ch[3] for ch in changes],
+                        "s": [first + i for i in range(len(changes))],
+                    },
+                )
+                events = {ch[0]: ch[4] for ch in changes}
+                got = await fetchall(
+                    conn,
+                    STATE_SELECT + "WHERE cs.user_id = :u AND cs.ssq BETWEEN :a AND :b ORDER BY cs.ssq",
+                    {"u": c.user_id, "a": first, "b": first + len(changes) - 1},
+                )
+                states = [serialize(r, self.hub.is_online, events[r.chat_id]) for r in got]
             claimed_missing = [ch for ch in claimed if ch not in {r.chat_id for r in rows}]
             lost.extend(claimed_missing)
-        for chat_id in resumed + lost:
-            self._cancel(self.grace_timers, (c.user_id, chat_id))
+        # a varredura de tolerância do usuário reconfere tudo no banco: os chats deste host já não vencem
         for st_json in states:
-            self._cancel(self.grace_timers, (c.user_id, st_json["chat_id"]))
             self.broadcast_state(c.user_id, st_json)
         for key in force_keys:
             self._schedule(self.force_timers, key, self.settings.handover_force_timeout_s, self._force_expired)
-        revs = self.pending_revocations.pop(c.device_id, [])
+        _, q = self.pending_revocations.pop(c.device_id, (c.user_id, {}))
         seen = {m["chat_id"] for m in after_welcome if m["t"] == "host.revoked"}
-        after_welcome = [m for m in revs if m["chat_id"] not in seen] + after_welcome
+        after_welcome = [m for m in q.values() if m["chat_id"] not in seen] + after_welcome
         return resumed, lost, after_welcome
 
     async def on_disconnect(self, c: Conn) -> None:
@@ -601,88 +744,173 @@ class Coordinator:
             if pc.host == c.device_id and pc.user_id == c.user_id:
                 self._fail(key, "host_offline")
         grace = self.settings.host_drop_grace_s
-        states: list[dict[str, Any]] = []
+        rows: list[Any] = []
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
             if self.hub.is_online(c.device_id):  # reconectou nesse meio-tempo
                 return
-            rows = await fetchall(
-                conn,
-                "SELECT chat_id FROM chat_states WHERE user_id = :u AND host_device_id = :d AND host_dropped_at IS NULL "
-                "ORDER BY chat_id FOR UPDATE",
-                {"u": c.user_id, "d": c.device_id},
-            )
-            now = utcnow()
-            for r in rows:
-                states.append(
-                    await self._update(
-                        conn,
-                        c.user_id,
-                        r.chat_id,
-                        {"host_dropped_at": now, "host_grace_deadline": now + timedelta(seconds=grace)},
-                        None,
-                    )
+            # todos os chats deste host de uma vez (O(1) comandos por queda): ssq em sequência na ordem de
+            # chat_id. Quem escreve em chat_states trava antes a linha do usuário, então o conjunto não muda
+            p = {"u": c.user_id, "d": c.device_id}
+            n = int(
+                await fetchval(
+                    conn,
+                    "SELECT count(*) FROM chat_states WHERE user_id = :u AND host_device_id = :d "
+                    "AND host_dropped_at IS NULL",
+                    p,
                 )
-        for st in states:
-            self._schedule(self.grace_timers, (c.user_id, st["chat_id"]), grace, self._grace_expired)
-            self.broadcast_state(c.user_id, st)
+            )
+            if n:
+                now = utcnow()
+                first = await next_ssq(conn, c.user_id, n)
+                await execute(
+                    conn,
+                    "WITH t AS (SELECT chat_id, row_number() OVER (ORDER BY chat_id) - 1 AS k FROM chat_states "
+                    "WHERE user_id = :u AND host_device_id = :d AND host_dropped_at IS NULL) "
+                    "UPDATE chat_states cs SET host_dropped_at = :now, host_grace_deadline = :dl, ssq = :first + t.k, "
+                    "updated_at = now() FROM t WHERE cs.user_id = :u AND cs.chat_id = t.chat_id",
+                    {**p, "now": now, "dl": now + timedelta(seconds=grace), "first": first},
+                )
+                rows = await fetchall(
+                    conn,
+                    STATE_SELECT + "WHERE cs.user_id = :u AND cs.ssq BETWEEN :a AND :b ORDER BY cs.ssq",
+                    {"u": c.user_id, "a": first, "b": first + n - 1},
+                )
+        for row in rows:
+            self.broadcast_state(c.user_id, serialize(row, self.hub.is_online))
+        if rows:
+            self._schedule_sweep("grace", c.user_id, grace)
 
-    async def _grace_expired(self, user_id: uuid.UUID, chat_id: str) -> None:
+    async def _grace_sweep(self, user_id: uuid.UUID, _key: str = SWEEP) -> None:
+        """Fim da tolerância (§8.3): todos os chats do usuário com o prazo vencido e o host fora, numa
+        transação e O(1) comandos (caiu → janela fechada; troca pendente → novo host). Reagenda para o
+        próximo prazo, se houver."""
+        self._sweep_due.pop(("grace", user_id), None)
         post: Post = []
         async with self.engine.begin() as conn:
             await lock_user(conn, user_id)
-            st = await lock_state(conn, user_id, chat_id)
-            if (
-                st is None
-                or st.host_device_id is None
-                or self.hub.is_online(st.host_device_id)
-                or st.host_grace_deadline is None
-                or st.host_grace_deadline > utcnow() + timedelta(milliseconds=50)
-            ):
-                return
-            dropped = await self._update(
+            limit = utcnow() + timedelta(milliseconds=50)
+            rows = [
+                r
+                for r in await fetchall(
+                    conn,
+                    "SELECT * FROM chat_states WHERE user_id = :u AND host_device_id IS NOT NULL "
+                    "AND host_grace_deadline IS NOT NULL AND host_grace_deadline <= :t ORDER BY chat_id FOR UPDATE",
+                    {"u": user_id, "t": limit},
+                )
+                if not self.hub.is_online(r.host_device_id)
+            ]
+            if rows:
+                # ssq como se fosse chat a chat: queda e, logo depois, a concessão da troca pendente
+                s = await next_ssq(conn, user_id, len(rows) + sum(1 for r in rows if r.handover_to is not None))
+                drops: list[tuple[str, int]] = []
+                grants: list[tuple[Any, uuid.UUID, int]] = []
+                for r in rows:
+                    drops.append((r.chat_id, s))
+                    s += 1
+                    if r.handover_to is not None:
+                        grants.append((r, r.handover_to, s))
+                        s += 1
+                chats = [ch for ch, _ in drops]
+                await execute(
+                    conn,
+                    "UPDATE chat_states cs SET window_purpose = NULL, window_since = NULL, host_grace_deadline = NULL, "
+                    "ssq = v.s, updated_at = now() FROM unnest(CAST(:c AS text[]), CAST(:s AS bigint[])) AS v(chat_id, s) "
+                    "WHERE cs.user_id = :u AND cs.chat_id = v.chat_id",
+                    {"u": user_id, "c": chats, "s": [x for _, x in drops]},
+                )
+                dropped = {
+                    r.chat_id: serialize(
+                        r, self.hub.is_online, {"kind": "host_dropped", "device_id": str(r.host_device_id)}
+                    )
+                    for r in await fetchall(
+                        conn,
+                        STATE_SELECT + "WHERE cs.user_id = :u AND cs.chat_id = ANY(CAST(:c AS text[]))",
+                        {"u": user_id, "c": chats},
+                    )
+                }
+                granted: dict[str, Callable[[], None]] = {}
+                if grants:
+                    gpost: Post = []
+                    gstates = await self._grant_many(conn, user_id, grants, "takeover", gpost)
+                    granted = {st["chat_id"]: fn for st, fn in zip(gstates, gpost, strict=True)}
+                for ch in chats:  # mesma ordem de antes, chat a chat: caiu → novo host
+                    post.append(functools.partial(self.broadcast_state, user_id, dropped[ch]))
+                    if ch in granted:
+                        post.append(granted[ch])
+            nxt = await fetchval(
                 conn,
-                user_id,
-                chat_id,
-                {"window_purpose": None, "window_since": None, "host_grace_deadline": None},
-                {"kind": "host_dropped", "device_id": str(st.host_device_id)},
+                "SELECT min(host_grace_deadline) FROM chat_states WHERE user_id = :u AND host_device_id IS NOT NULL "
+                "AND host_grace_deadline > :t",
+                {"u": user_id, "t": limit},
             )
-            post.append(lambda: self.broadcast_state(user_id, dropped))
-            if st.handover_to is not None:
-                st2 = await lock_state(conn, user_id, chat_id)
-                await self._grant(conn, user_id, st2, st.handover_to, "takeover", post)
         self._run(post)
+        if nxt is not None:
+            self._schedule_sweep("grace", user_id, (nxt - utcnow()).total_seconds())
+
+    async def _force_sweep(self, user_id: uuid.UUID, _key: str = SWEEP) -> None:
+        """Trocas forçadas vencidas do usuário (reagendadas no boot), numa transação."""
+        self._sweep_due.pop(("force", user_id), None)
+        post: Post = []
+        async with self.engine.begin() as conn:
+            await lock_user(conn, user_id)
+            limit = utcnow() + timedelta(milliseconds=50)
+            rows = await fetchall(
+                conn,
+                "SELECT * FROM chat_states WHERE user_id = :u AND handover_to IS NOT NULL AND handover_mode = 'force' "
+                "AND handover_deadline IS NOT NULL AND handover_deadline <= :t ORDER BY chat_id FOR UPDATE",
+                {"u": user_id, "t": limit},
+            )
+            if rows:
+                s = await next_ssq(conn, user_id, len(rows))
+                await self._grant_many(
+                    conn, user_id, [(r, r.handover_to, s + i) for i, r in enumerate(rows)], "takeover", post
+                )
+            nxt = await fetchval(
+                conn,
+                "SELECT min(handover_deadline) FROM chat_states WHERE user_id = :u AND handover_deadline > :t",
+                {"u": user_id, "t": limit},
+            )
+        self._run(post)
+        if nxt is not None:
+            self._schedule_sweep("force", user_id, (nxt - utcnow()).total_seconds())
 
     async def boot(self) -> None:
         """Reinício do servidor (§8.3 (4)): todas as conexões caíram; hosts que estavam conectados (ou em
-        tolerância) ganham SERVER_RESTART_GRACE_S a partir do boot. Trocas forçadas pendentes são reagendadas."""
+        tolerância) ganham SERVER_RESTART_GRACE_S a partir do boot. Trocas forçadas pendentes são reagendadas.
+        Tudo em O(1) comandos (ssq novos por usuário, na ordem de chat_id) e um timer por usuário: a subida
+        não cresce com o número de chats."""
         restart = self.settings.server_restart_grace_s
         now = utcnow()
         async with self.engine.begin() as conn:
+            await execute(
+                conn,
+                "WITH t AS (SELECT user_id, chat_id, row_number() OVER (PARTITION BY user_id ORDER BY chat_id) AS k "
+                "FROM chat_states WHERE host_device_id IS NOT NULL "
+                "AND (host_dropped_at IS NULL OR host_grace_deadline IS NOT NULL)), "
+                "n AS (SELECT user_id, count(*) AS n FROM t GROUP BY user_id), "
+                "u AS (UPDATE users SET state_seq = users.state_seq + n.n FROM n WHERE users.id = n.user_id "
+                "RETURNING users.id, users.state_seq - n.n AS base) "
+                "UPDATE chat_states cs SET host_dropped_at = COALESCE(cs.host_dropped_at, :now), "
+                "host_grace_deadline = GREATEST(COALESCE(cs.host_grace_deadline, :now), :dl), ssq = u.base + t.k, "
+                "updated_at = now() FROM t JOIN u ON u.id = t.user_id "
+                "WHERE cs.user_id = t.user_id AND cs.chat_id = t.chat_id",
+                {"now": now, "dl": now + timedelta(seconds=restart)},
+            )
             hosted = await fetchall(
                 conn,
-                "SELECT user_id, chat_id, host_dropped_at, host_grace_deadline FROM chat_states "
-                "WHERE host_device_id IS NOT NULL AND (host_dropped_at IS NULL OR host_grace_deadline IS NOT NULL) "
-                "ORDER BY user_id, chat_id FOR UPDATE",
+                "SELECT user_id, min(host_grace_deadline) AS due FROM chat_states "
+                "WHERE host_device_id IS NOT NULL AND host_grace_deadline IS NOT NULL GROUP BY user_id",
             )
-            for r in hosted:
-                deadline = max(r.host_grace_deadline or now, now + timedelta(seconds=restart))
-                await self._update(
-                    conn,
-                    r.user_id,
-                    r.chat_id,
-                    {"host_dropped_at": r.host_dropped_at or now, "host_grace_deadline": deadline},
-                    None,
-                )
-                self._schedule(
-                    self.grace_timers, (r.user_id, r.chat_id), (deadline - now).total_seconds(), self._grace_expired
-                )
             forced = await fetchall(
-                conn, "SELECT user_id, chat_id, handover_deadline FROM chat_states WHERE handover_deadline IS NOT NULL"
+                conn,
+                "SELECT user_id, min(handover_deadline) AS due FROM chat_states WHERE handover_deadline IS NOT NULL "
+                "GROUP BY user_id",
             )
-            for r in forced:
-                delay = max((r.handover_deadline - now).total_seconds(), 0.0)
-                self._schedule(self.force_timers, (r.user_id, r.chat_id), delay, self._force_expired)
+        for r in hosted:
+            self._schedule_sweep("grace", r.user_id, (r.due - now).total_seconds())
+        for r in forced:
+            self._schedule_sweep("force", r.user_id, (r.due - now).total_seconds())
 
     async def shutdown(self) -> None:
         self._closing = True
@@ -690,20 +918,30 @@ class Coordinator:
             for t in timers.values():
                 t.cancel()
             timers.clear()
+        self._sweep_due.clear()
         for pc in self.pending.values():
             if pc.timer is not None:
                 pc.timer.cancel()
         self.pending.clear()
 
     def forget_user(self, user_id: uuid.UUID) -> None:
-        """Conta apagada / chaves zeradas: descarta timers e comandos em memória."""
+        """Conta apagada / banida / chaves zeradas: descarta timers, comandos e host.revoked em memória."""
         for timers in (self.grace_timers, self.force_timers):
             for key in [k for k in timers if k[0] == user_id]:
                 self._cancel(timers, key)
+        for sk in [k for k in self._sweep_due if k[1] == user_id]:
+            del self._sweep_due[sk]
         for key in [k for k in self.pending if k[0] == user_id]:
             pc = self.pending.pop(key)
             if pc.timer is not None:
                 pc.timer.cancel()
+        for d in [d for d, (u, _) in self.pending_revocations.items() if u == user_id]:
+            del self.pending_revocations[d]
+
+    def forget_devices(self, device_ids: list[uuid.UUID]) -> None:
+        """Dispositivos revogados nunca mais conectam: os host.revoked guardados para eles saem."""
+        for d in device_ids:
+            self.pending_revocations.pop(d, None)
 
     # ------------------------------------------------------------------ comandos remotos (§8.6)
     def _track(self, user_id: uuid.UUID, cmd_id: str, chat_id: str, sender: uuid.UUID, host: uuid.UUID) -> None:
@@ -744,6 +982,7 @@ class Coordinator:
         _env_size_ok(data.get("env"), COMMAND_MAX_BYTES)
         env = parse_envelope(data.get("env"), "env")
         async with self.engine.connect() as conn:
+            await self._assert_active(conn, c)
             st = await load_state(conn, c.user_id, chat_id)
             if st is not None and st.divergence_id is not None:
                 raise ApiError(

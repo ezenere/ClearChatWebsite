@@ -5,11 +5,15 @@ moldura (magic "CCB1", chunk_log2 10..24, tamanhos de chunk coerentes)."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
+import logging
 import os
 import shutil
+import time
 import uuid
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +34,8 @@ HEADER_LEN = 21
 TAG_LEN = 16
 MAGIC = b"CCB1"
 
+log = logging.getLogger("clearchat.blobs")
+
 
 def check_framing(header: bytes, total_len: int) -> str | None:
     """Valida a moldura CCB1 sem decifrar. Devolve o motivo da falha ou None se ok."""
@@ -49,9 +55,25 @@ def check_framing(header: bytes, total_len: int) -> str | None:
     return None
 
 
+async def _in_thread[T](fn: Callable[..., T], *args: Any) -> T:
+    """I/O de disco bloqueante numa thread (o worker é um só para todos). Se a tarefa for cancelada no meio,
+    espera a thread terminar antes de propagar — quem limpa depois (unlink/rename) vê o disco já estável."""
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await fut
+        raise
+
+
 class BlobStore:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, sweep: bool = True) -> None:
         self.root = Path(settings.blob_storage_dir)
+        self._bg: set[asyncio.Future[Any]] = set()
+        if sweep:
+            # na subida: temporários de upload (*.tmp-*) e lixeiras (.trash-*) que sobraram de uma queda
+            self._background(self.sweep_stale, settings.blob_tmp_sweep_age_s)
 
     def user_dir(self, user_id: uuid.UUID | str) -> Path:
         return self.root / str(uuid.UUID(str(user_id)))
@@ -65,8 +87,67 @@ class BlobStore:
         with contextlib.suppress(FileNotFoundError):
             self.path(user_id, blob_id).unlink()
 
+    def remove_many(self, files: Iterable[tuple[uuid.UUID | str, str]]) -> None:
+        for user_id, blob_id in files:
+            self.remove(user_id, blob_id)
+
+    async def remove_many_async(self, files: Iterable[tuple[uuid.UUID | str, str]]) -> None:
+        """`remove_many` fora do event loop (GC: muitos unlink de uma vez)."""
+        await _in_thread(self.remove_many, list(files))
+
     def remove_user(self, user_id: uuid.UUID | str) -> None:
-        shutil.rmtree(self.user_dir(user_id), ignore_errors=True)
+        """Tira a pasta do usuário do caminho na hora (rename, O(1)) e apaga o conteúdo numa thread: o
+        `rmtree` de milhares de arquivos não trava o event loop. Uploads novos já caem numa pasta limpa."""
+        d = self.user_dir(user_id)
+        trash = self.root / f".trash-{uuid.uuid4().hex}"
+        try:
+            d.rename(trash)
+        except FileNotFoundError:
+            return
+        except OSError:
+            shutil.rmtree(d, ignore_errors=True)
+            return
+        self._background(shutil.rmtree, trash, True)
+
+    def sweep_stale(self, max_age_s: float) -> int:
+        """Apaga temporários de upload mais velhos que `max_age_s` e lixeiras de `remove_user` interrompido.
+        Devolve quantos temporários apagou."""
+        cutoff = time.time() - max_age_s
+        n = 0
+        try:
+            for d in self.root.glob(".trash-*"):
+                shutil.rmtree(d, ignore_errors=True)
+            for p in self.root.glob("*/*/*.tmp-*"):
+                with contextlib.suppress(OSError):
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                        n += 1
+        except OSError:
+            log.warning("falha na limpeza de temporários de blob", exc_info=True)
+        if n:
+            log.info("temporários de blob apagados", extra={"count": n})
+        return n
+
+    def _background(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Roda `fn` numa thread sem esperar (com event loop rodando); sem loop, roda na hora."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            fn(*args)
+            return
+        fut = loop.run_in_executor(None, fn, *args)
+        self._bg.add(fut)
+        fut.add_done_callback(self._bg.discard)
+
+    async def drain(self) -> None:
+        """Espera as tarefas de disco em segundo plano (testes / desligamento)."""
+        while self._bg:
+            await asyncio.gather(*list(self._bg), return_exceptions=True)
+
+
+def _install(tmp: Path, final: Path) -> None:
+    os.replace(tmp, final)
+    _fsync_dir(final.parent)
 
 
 def _fsync_dir(d: Path) -> None:
@@ -159,7 +240,7 @@ async def blob_put(
                     h.update(chunk)
                     f.write(chunk)
                 f.flush()
-                os.fsync(f.fileno())
+                await _in_thread(os.fsync, f.fileno())
         except ClientDisconnect as e:
             raise ApiError("invalid_request", details={"reason": "incomplete_upload"}) from e
         if clen_hdr is not None and size != int(clen_hdr):
@@ -190,7 +271,8 @@ async def blob_put(
             )
             await execute(
                 conn,
-                "UPDATE users SET usage_blob_bytes = usage_blob_bytes + :s, usage_blobs = usage_blobs + 1 WHERE id = :u",
+                "UPDATE users SET usage_blob_bytes = GREATEST(usage_blob_bytes + :s, 0), "
+                "usage_blobs = GREATEST(usage_blobs + 1, 0) WHERE id = :u",
                 {"u": p.user_id, "s": size},
             )
             await execute(
@@ -200,8 +282,7 @@ async def blob_put(
                 "blob_bytes = usage_daily.blob_bytes + EXCLUDED.blob_bytes",
                 {"u": p.user_id, "s": size},
             )
-            os.replace(tmp, final)
-            _fsync_dir(final.parent)
+            await _in_thread(_install, tmp, final)
         return _json(201, {"blob_id": blob_id, "created": True})
     except BaseException:
         # se o commit falhar depois do rename, o arquivo não pode ficar sem linha

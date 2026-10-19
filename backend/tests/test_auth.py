@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import ipaddress
+import random
+import re
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 from conftest import SECRET, rand_ip
 from sqlalchemy import text
 
+from clearchat_server.auth.codes import net_key
+from clearchat_server.config import Settings
 from clearchat_server.util import client_ip
 
 
@@ -156,45 +161,108 @@ async def test_rate_limit_per_ip_trusted_proxy(srv):
     assert statuses[:20] == [202] * 20 and statuses[20] == 429
 
 
+def net_ip(net: str) -> dict[str, str]:
+    """IP aleatório dentro de uma /24 fixa (os limites de verify contam por e-mail + rede do cliente)."""
+    return {"X-Real-IP": f"{net}.{random.randint(1, 254)}"}
+
+
+async def _clear_counters(srv, like):
+    async with srv.ctx.engine.begin() as c:
+        await c.execute(text("DELETE FROM rate_counters WHERE bucket LIKE :l"), {"l": like})
+
+
+async def _verify(srv, email, code, headers):
+    return await srv.http.post(
+        "/api/v1/auth/code/verify", json={"email": email, "code": code, "device": srv.device()}, headers=headers
+    )
+
+
 async def test_verify_lockout_after_15_failures(srv):
     await srv.signup("lock@example.com")
+    attacker = "198.51.100"  # mesma /24, hosts variados
     for _round in range(3):
         await srv.http.post("/api/v1/auth/code/request", json={"email": "lock@example.com"}, headers=ipk())
         for _ in range(5):
-            r = await srv.http.post(
-                "/api/v1/auth/code/verify",
-                json={"email": "lock@example.com", "code": "999999x", "device": srv.device()},
-                headers=ipk(),
-            )
+            r = await _verify(srv, "lock@example.com", "999999x", net_ip(attacker))
             assert r.status_code == 400
-        # o limite de 10 verify/h por e-mail chegaria antes: simula a passagem do tempo
-        async with srv.ctx.engine.begin() as c:
-            await c.execute(text("DELETE FROM rate_counters WHERE bucket LIKE 'verify:%'"))
-    # 15 falhas → bloqueado (mesmo com o código certo)
-    async with srv.ctx.engine.begin() as c:
-        await c.execute(text("DELETE FROM rate_counters WHERE bucket LIKE 'code_req%'"))
+        # o limite de 10 verify/h por e-mail + rede chegaria antes: simula a passagem do tempo
+        await _clear_counters(srv, "verify:%")
+    # 15 falhas contra códigos vivos → bloqueado nesta rede (mesmo com o código certo)
+    await _clear_counters(srv, "code_req%")
     await srv.http.post("/api/v1/auth/code/request", json={"email": "lock@example.com"}, headers=ipk())
     await srv.flush_mail()
     code = srv.last_code("lock@example.com", "login")
-    r = await srv.http.post(
-        "/api/v1/auth/code/verify",
-        json={"email": "lock@example.com", "code": code, "device": srv.device()},
-        headers=ipk(),
-    )
+    r = await _verify(srv, "lock@example.com", code, net_ip(attacker))
     assert r.status_code == 429
     assert 3000 < int(r.headers["Retry-After"]) <= 3600
+    # o bloqueio é só da rede que errou: o dono, de outra rede, entra com o mesmo código
+    r = await _verify(srv, "lock@example.com", code, net_ip("203.0.113"))
+    assert r.status_code == 200, r.text
 
 
-async def test_verify_rate_limit_per_email(srv):
+async def test_verify_rate_limit_per_email_and_network(srv):
     statuses = []
     for _ in range(11):
-        r = await srv.http.post(
-            "/api/v1/auth/code/verify",
-            json={"email": "v@example.com", "code": "123456", "device": srv.device()},
-            headers=ipk(),
-        )
+        r = await _verify(srv, "v@example.com", "123456", net_ip("198.51.100"))
         statuses.append(r.status_code)
     assert statuses[:10] == [400] * 10 and statuses[10] == 429
+    # outra rede não herda o limite da primeira
+    r = await _verify(srv, "v@example.com", "123456", net_ip("203.0.113"))
+    assert r.status_code == 400
+
+
+async def test_third_party_bogus_verifies_dont_block_owner(srv):
+    """Regressão: verify com código aleatório sem código vivo (de várias redes) não bloqueia o dono."""
+    await srv.signup("victim@example.com")
+    # rede do atacante: estoura o limite por hora dela e passa de 15 falhas (sem código pendente)
+    for _ in range(12):
+        await _verify(srv, "victim@example.com", "000000", net_ip("198.51.100"))
+    await _clear_counters(srv, "verify:%")
+    for _ in range(8):
+        await _verify(srv, "victim@example.com", "000000", net_ip("198.51.100"))
+    # e de muitas redes diferentes
+    for _ in range(30):
+        await _verify(srv, "victim@example.com", "000000", ipk())
+    async with srv.ctx.engine.connect() as c:
+        assert (await c.execute(text("SELECT count(*) FROM lockouts"))).scalar() == 0
+    # o dono pede o código e entra com ele, da rede dele
+    owner = net_ip("203.0.113")
+    r = await srv.http.post("/api/v1/auth/code/request", json={"email": "victim@example.com"}, headers=owner)
+    assert r.status_code == 202
+    await srv.flush_mail()
+    r = await _verify(srv, "victim@example.com", srv.last_code("victim@example.com", "login"), owner)
+    assert r.status_code == 200, r.text
+    # reauth do dono (apagar conta) também passa
+    s = await srv.login("victim@example.com")
+    r = await srv.http.post("/api/v1/auth/reauth/request", json={"purpose": "delete_account"}, headers=s.h)
+    assert r.status_code == 202
+    await srv.flush_mail()
+    code = srv.last_code("victim@example.com", "delete_account")
+    r = await srv.http.request("DELETE", "/api/v1/account", json={"code": code}, headers={**s.h, **owner})
+    assert r.status_code == 204, r.text
+
+
+async def test_lockout_does_not_reveal_accounts(srv):
+    """Sem conta, o login grava um código fantasma: o bloqueio chega igual ao de uma conta existente."""
+    for _round in range(3):
+        r = await srv.http.post("/api/v1/auth/code/request", json={"email": "ghost@example.com"}, headers=ipk())
+        assert r.status_code == 202
+        for _ in range(5):
+            r = await _verify(srv, "ghost@example.com", "999999", net_ip("198.51.100"))
+            assert r.status_code == 400
+        await _clear_counters(srv, "verify:%")
+    await srv.flush_mail()
+    assert srv.mails("ghost@example.com") == []  # o fantasma nunca é enviado
+    r = await _verify(srv, "ghost@example.com", "999999", net_ip("198.51.100"))
+    assert r.status_code == 429 and 3000 < int(r.headers["Retry-After"]) <= 3600
+
+
+def test_net_key():
+    assert net_key("198.51.100.7") == net_key("198.51.100.200") == "198.51.100.0/24"
+    assert net_key("198.51.101.7") != net_key("198.51.100.7")
+    assert net_key("2001:db8:1:2:aaaa::1") == net_key("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
+    assert net_key("::ffff:198.51.100.7") == "198.51.100.0/24"
+    assert net_key(None) == net_key("garbage") == "noip"
 
 
 async def test_validation_errors(srv):
@@ -326,3 +394,18 @@ def test_client_ip_trust():
     assert client_ip("8.8.8.8", h, s) == "8.8.8.8"  # par não confiável: cabeçalhos ignorados
     assert client_ip("127.0.0.1", {"x-real-ip": "garbage"}, s) == "127.0.0.1"
     _ = (SECRET, timedelta)
+
+
+def test_default_trust_includes_edge_proxy():
+    """Perfil edge: o Caddy (IP fixo do compose) está no TRUSTED_PROXY_CIDRS padrão, então cada cliente
+    atrás dele tem o próprio IP (e os próprios baldes por IP), em vez de todos dividirem o IP do proxy."""
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
+    edge_ip = re.search(r"ipv4_address: \$\{EDGE_IP:-([0-9.]+)\}", compose).group(1)
+    settings = Settings(_env_file=None, server_secret=SECRET)  # type: ignore[call-arg]
+    assert client_ip(edge_ip, {"x-real-ip": "203.0.113.5"}, settings) == "203.0.113.5"
+    assert client_ip(edge_ip, {"x-real-ip": "198.51.100.9"}, settings) == "198.51.100.9"
+    assert client_ip("172.31.250.1", {"x-real-ip": "203.0.113.5"}, settings) == "203.0.113.5"
+    assert client_ip("172.31.250.3", {"x-real-ip": "203.0.113.5"}, settings) == "172.31.250.3"
+    example = (Path(__file__).resolve().parents[2] / ".env.example").read_text()
+    assert f"TRUSTED_PROXY_CIDRS={settings.trusted_proxy_cidrs}\n" in example
+    assert f"EDGE_IP={edge_ip}\n" in example
