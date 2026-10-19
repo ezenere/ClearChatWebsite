@@ -18,7 +18,7 @@ __pycache__/
 *.egg-info/
 
 # dados locais
-data/
+/data/
 *.dump
 *.log
 
