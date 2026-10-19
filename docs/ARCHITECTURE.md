@@ -485,6 +485,11 @@ server {
         limit_req zone=cc_ws burst=10;
         proxy_pass http://127.0.0.1:8100;
         proxy_http_version 1.1;
+        # um location com proxy_set_header próprio NÃO herda os do server: repetir os de IP
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 3600s;     # heartbeats a cada 15 s mantêm viva
@@ -501,6 +506,26 @@ server { listen 80; server_name clear.ezenere.com; return 301 https://$host$requ
 
 Com base path (ex.: `/clearchat`), prefixar cada `location` (`/clearchat/api/…`, `/clearchat/ws`,
 `/clearchat/`) mantendo `proxy_pass` **sem** caminho (a app já espera o prefixo).
+
+**IP real do cliente — cadeia completa.** Cliente → Nginx do host (`$remote_addr`) → `X-Real-IP` /
+`X-Forwarded-For` **sobrescritos** com `$remote_addr` → container da api, que só aceita esses cabeçalhos
+quando a conexão vem de `TRUSTED_PROXY_CIDRS` (`127.0.0.1`, gateway `172.31.250.1` do compose); de
+qualquer outra origem usa o IP do par (`clearchat_server/util.py:client_ip`). Os `limit_req` do Nginx
+(chave `$binary_remote_addr`) e os limites por IP da api (§5) usam esse mesmo IP.
+
+**Atrás da Cloudflare (OPCIONAL — só com o proxy da Cloudflare ligado, "nuvem laranja").** Com o proxy,
+toda conexão chega de uma borda da Cloudflare (ex.: `172.69.x.x`) e, sem ajuste, o `$remote_addr` — e
+portanto `X-Real-IP`, os `limit_req` e os limites por IP da api — seria o da borda (todos os usuários
+dividiriam o mesmo balde). A correção é no Nginx, com o `ngx_http_realip_module` (incluído nos pacotes
+do Debian/Ubuntu e no nginx.org): o `deploy/nginx.example.conf` traz, **comentado**, um bloco com
+`set_real_ip_from` para cada faixa IPv4/IPv6 publicada em <https://www.cloudflare.com/ips-v4> e
+<https://www.cloudflare.com/ips-v6> e `real_ip_header CF-Connecting-IP;`. Descomentado (no mesmo
+`server {}` dos `location`), o Nginx troca o `$remote_addr` pelo `CF-Connecting-IP` **apenas** quando a
+conexão vem de uma faixa da Cloudflare — de qualquer outra origem o cabeçalho é ignorado, então ninguém
+forja o IP falando direto com a origem; conexões que não passam pela Cloudflare (rede local, acesso
+direto pelo IP) continuam com o próprio IP. Nada muda no backend: ele continua confiando no `X-Real-IP`
+que o Nginx local (127.0.0.1 / gateway do compose) escreve, agora com o IP real. Com DNS only (sem proxy),
+deixe o bloco comentado. As faixas da Cloudflare mudam raramente; revise a lista de vez em quando.
 
 ### 8.2 Backup e atualização
 
@@ -546,6 +571,15 @@ Os testes sobem a api de verdade (uvicorn numa porta livre) contra um Postgres r
 protocolo encurtados (tolerância 0,5 s, troca forçada 0,6 s, timeout de comando 0,6 s), e cobrem auth,
 sessões, chaves, push/pull, blobs, WebSocket, host/comandos/stream, divergência e o painel admin.
 Turnstile é testado com um transporte httpx falso (sem rede).
+
+Site (`frontend/`): `npm run test` (unitários, inclusive os vetores de cripto), `npm run test:e2e`
+(Playwright contra a API simulada de `src/mock`) e o **E2E de integração contra o backend real**
+(`e2e-integration/`): com a api rodando (`MAIL_BACKEND=console`, cadastro aberto, sem Turnstile),
+`CLEARCHAT_IT_BACKEND_URL=http://127.0.0.1:8100 CLEARCHAT_IT_MAIL_LOG=/caminho/do/log-da-api npm run
+test:e2e:integration` sobe o Vite (sem mock, repassando `/api` e `/ws` para a api) e cobre cadastro,
+login por código em outro navegador, desbloqueio, WebSocket chegando a "Ao vivo", registro criado pelo
+site aparecendo no feed `GET /sync/changes` e a notificação `sync.changes` atualizando a lista da outra
+aba, além da reconexão após queda. Sem `CLEARCHAT_IT_BACKEND_URL` os testes são pulados.
 
 ## 11. Checklist de segurança
 
