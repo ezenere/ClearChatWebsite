@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..chatstate import ensure_state, load_state, lock_user, next_ssq, serialize
-from ..db import execute, fetchall, fetchone
+from ..db import execute, fetchall, fetchone, fetchval
 from ..errors import ApiError
 from ..util import BLOB_ID_RE, RECORD_ID_RE, b64u_encode, iso, utcnow
 from .envelope import Envelope, parse_envelope
@@ -675,6 +675,30 @@ async def push(
         raise err from None
 
 
+async def _foreign_content_after(
+    conn: AsyncConnection, user_id: uuid.UUID, chat_id: str, device_id: uuid.UUID, base: int
+) -> bool:
+    """Há conteúdo (session/message) do chat com `seq > base` escrito por OUTRO dispositivo? (§8.4, §9.1)
+
+    O `head` de um chat só avança pelo `seq` de conteúdo gravado nele (push ou resolução keep=local), e
+    tombstones de conteúdo ficam como linha com o `device_id` de quem apagou; então as linhas com
+    `seq > base` são o que mudou desde a base. Se todas são de `device_id`, a base velha é só o próprio
+    dispositivo que não a atualizou entre lotes (ex.: chat novo grande enviado em vários lotes com a mesma
+    `chat_bases`) — não há outra história, logo não há divergência. `device_id` NULL conta como outro
+    dispositivo (IS DISTINCT FROM). Escrita de outro dispositivo que some sem deixar linha não é vista:
+    tombstone recolhido pelo GC (§7.8, base com mais de TOMBSTONE_RETENTION_DAYS) ou registro sobrescrito
+    depois pelo próprio remetente (que então já o tinha visto). Usa `records_user_scope (user_id, scope_id)`
+    e lê no máximo as linhas desse chat; só roda quando b < head."""
+    return bool(
+        await fetchval(
+            conn,
+            "SELECT EXISTS (SELECT 1 FROM records WHERE user_id = :u AND scope_id = :c "
+            "AND type = ANY(CAST(:t AS text[])) AND seq > :b AND device_id IS DISTINCT FROM CAST(:d AS uuid))",
+            {"u": user_id, "c": chat_id, "t": sorted(CONTENT), "b": base, "d": device_id},
+        )
+    )
+
+
 async def _push_tx(
     conn: AsyncConnection, user: Any, device_id: uuid.UUID, can_host: bool, req: PushReq, is_online: IsOnline
 ) -> PushOutcome:
@@ -726,7 +750,9 @@ async def _push_tx(
                 raise ApiError(
                     "divergence_discarded", details={"chat_id": chat_id, "divergence_id": str(disc.divergence_id)}
                 )
-            raise DivergenceDetected(chat_id, b)
+            if await _foreign_content_after(conn, user_id, chat_id, device_id, b):
+                raise DivergenceDetected(chat_id, b)
+            # tudo o que veio depois da base foi escrito por este mesmo dispositivo → segue como b == head
         he = req.host_epochs.get(chat_id)
         is_host = st is not None and st.host_device_id == device_id
         if he is not None and not (is_host and st is not None and he == int(st.epoch)):
@@ -789,7 +815,13 @@ async def mark_divergence(
         await lock_user(conn, user_id)
         st = await ensure_state(conn, user_id, chat_id)
         broadcast = None
-        if st.divergence_id is None and base < int(st.head):
+        # mesma regra do push (re-checada aqui, outra transação): só diverge se outro dispositivo escreveu
+        # conteúdo depois da base
+        if (
+            st.divergence_id is None
+            and base < int(st.head)
+            and await _foreign_content_after(conn, user_id, chat_id, device_id, base)
+        ):
             ssq = await next_ssq(conn, user_id)
             await execute(
                 conn,

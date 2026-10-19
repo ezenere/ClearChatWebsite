@@ -317,7 +317,10 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
   (`scope_missing`/`scope_deleted`) → regras de conteúdo do chat (§8.4: divergência, `stale_base`,
   `not_host`, `chat_busy`) → revisão (`rev_mismatch`/`gone`) → cotas → escrita. As regras do chat vêm
   antes das de revisão para que um replay com base velha marque a divergência em vez de devolver
-  `rev_mismatch`. A divergência é gravada numa transação própria (o lote em si é recusado).
+  `rev_mismatch`. A divergência é gravada numa transação própria (o lote em si é recusado). Base velha
+  (`b < head`) só diverge se houver `session`/`message` do chat com `seq > b` gravado por outro
+  dispositivo (`device_id IS DISTINCT FROM`, via `records_user_scope`); se tudo depois da base é do
+  próprio remetente (lotes de um mesmo envio com a mesma base), o push segue como `b == head`.
 - **Reset de chaves**: apaga registros/blobs sem tombstones; `seq` continua monotônico e
   `tombstone_floor = seq` (cursores antigos → `410 cursor_expired` → resync).
 
@@ -367,7 +370,7 @@ As interpretações adotadas durante a implementação (corpos de resposta de `/
 `divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
 tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
 sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
-`docs/SYNC_PROTOCOL.md` (v1.1.0, ainda não lançado) — vale o que está lá.
+`docs/SYNC_PROTOCOL.md` (v1.1.1, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 

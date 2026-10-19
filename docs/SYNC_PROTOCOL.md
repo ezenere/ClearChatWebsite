@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.1.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
+> **Versão do protocolo: 1.1.1** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -580,7 +580,7 @@ Clientes chamam antes de login (validação do servidor escolhido) e a cada cone
 (landing, "Criar conta", captcha).
 ```json
 { "name": "ClearChat", "server_version": "0.1.0", "base_url": "https://clear.ezenere.com",
-  "protocol": { "min": 1, "max": 1, "version": "1.1.0" },
+  "protocol": { "min": 1, "max": 1, "version": "1.1.1" },
   "features": {
     "signupOpen": true,
     "captcha": { "provider": "turnstile", "siteKey": "0x4AAAA…" },
@@ -893,9 +893,9 @@ stateDiagram-v2
     TrocaPendente --> HostOnline: host.release do host antigo / timeout do force / queda do host antigo → novo host (epoch+1)
     TrocaPendente --> Rodando: host.handover_cancel (volta ao estado anterior)
     HostOffline --> HostOnline: host.takeover (imediato, epoch+1)
-    SemHost --> Divergente: push com base < head
-    HostOnline --> Divergente: push de replay com base < head
-    HostOffline --> Divergente: push de replay com base < head
+    SemHost --> Divergente: push com base < head e conteúdo de outro dispositivo depois da base
+    HostOnline --> Divergente: push de replay com base < head e conteúdo de outro dispositivo depois da base
+    HostOffline --> Divergente: push de replay com base < head e conteúdo de outro dispositivo depois da base
     Divergente --> HostOnline: divergence/resolve
     Divergente --> HostOffline: divergence/resolve (host offline)
 ```
@@ -932,7 +932,9 @@ Transições (normativas):
 Um lote com `session`/`message` do chat X e `chat_bases[X] = b` é aceito se **todas**:
 - X não está divergente;
 - o `chat` X existe e não está apagado (ou é criado no mesmo lote);
-- `b == head(X)`;
+- `b == head(X)` — ou `b < head(X)` e **todo** conteúdo (`session`/`message`, inclusive tombstones) de X
+  com `seq > b` foi escrito pelo próprio D (ex.: chat novo grande enviado em vários lotes, todos com a
+  `chat_bases` calculada antes do primeiro): não há outra história, então vale como `b == head`;
 - e um dos modos:
   - **(A) janela do host**: há janela aberta em X, D é o host de X e o WebSocket de D está **conectado**
     (não em tolerância). `host_epochs[X]` é opcional; se vier, tem de ser o `epoch` atual.
@@ -943,8 +945,10 @@ Um lote com `session`/`message` do chat X e `chat_bases[X] = b` é aceito se **t
 Falhas (verificadas nesta ordem):
 - X divergente → `chat_diverged`.
 - `b > head` → `stale_base` (bug do cliente: puxar e recalcular; `details.head`).
-- `b < head` → o servidor marca a **divergência** (§9) e responde `chat_diverged` — salvo se
-  `(chat, D, b)` já estiver em `divergence_discards`: aí `divergence_discarded` (`details: { chat_id, divergence_id }`).
+- `b < head` → se `(chat, D, b)` estiver em `divergence_discards`: `divergence_discarded`
+  (`details: { chat_id, divergence_id }`). Senão, se algum conteúdo de X com `seq > b` foi escrito por
+  **outro** dispositivo, o servidor marca a **divergência** (§9) e responde `chat_diverged`; se todo ele é
+  do próprio D, segue para as checagens abaixo como se `b == head`.
 - `host_epochs[X]` presente mas D não é o host / epoch velho → `not_host` (o cliente passa a tratar o
   conteúdo como replay).
 - Janela aberta e D não é o host, **ou** D é o host mas o WebSocket dele está em tolerância (ex.: push
@@ -1078,7 +1082,9 @@ Duas histórias do mesmo chat produzidas sem uma ver a outra:
 - host que caiu com mensagens não enviadas, alguém assumiu e rodou, e o antigo volta;
 - dois dispositivos offline no mesmo chat.
 
-Detecção **só no servidor**: push de conteúdo com `chat_bases[X] < head(X)` (§8.4). O servidor grava
+Detecção **só no servidor**: push de conteúdo com `chat_bases[X] < head(X)` (§8.4) quando há conteúdo de X
+com `seq > chat_bases[X]` escrito por **outro** dispositivo (se tudo depois da base é do próprio
+remetente, não há duas histórias e não diverge). O servidor grava
 `diverged = { divergence_id (uuid), device_id = quem enviou, base = b, head = head atual, since }` e
 transmite `event: diverged`.
 
@@ -1794,6 +1800,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 |---|---|---|
 | 1.0.0 | 2026-10-19 | Contrato inicial (cripto, registros, REST, WebSocket, host de execução, divergência, merge, skills, anexos, instância/self-host, gateway reservado). |
 | 1.1.0 | 2026-10-19 | Adições compatíveis: `quota_exceeded` com `details.kind: 'chat_states'` — teto de estados de chat por usuário em `host.begin`/`host.takeover`/`host.pin` ao criar o estado de um chat (§7.10, §8.3, §8.8, §8.9, §10.4, §17.2, §17.4); `records/fetch`/`sync.fetch` com o orçamento de ~8 MiB por resposta, o cliente pede de novo os `omitted: true` até acabarem (§6.7, §7.2, §10.4). Texto: §17.3 — `code/verify` limitado por e-mail + rede do cliente (teto de 200/h por e-mail), bloqueio contando só erros contra um código vivo, código não enviado para o bloqueio não revelar contas, limite de 10/h para troca de wrap; §5.4 — reuso vale para qualquer refresh já rotacionado. |
+| 1.1.1 | 2026-10-19 | Texto (sem mudança de formato): §8.3/§8.4/§9.1 — `chat_bases[X] < head(X)` só marca divergência se houver conteúdo de X com `seq > base` escrito por outro dispositivo; se tudo depois da base é do próprio remetente (ex.: chat novo enviado em vários lotes com a mesma base), o push segue como `b == head`. `divergence_discarded` continua checado antes. |
 
 ---
 
