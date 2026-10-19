@@ -28,21 +28,71 @@ const NAV = [
   { to: '/app/instance', label: 'Instância', icon: Server }
 ]
 
+function liveLabel(s: string, stopCode: number | null): { label: string; title: string } {
+  switch (s) {
+    case 'online':
+      return { label: 'Ao vivo', title: 'Recebendo atualizações ao vivo' }
+    case 'offline':
+      return {
+        label: 'Reconectando',
+        title: 'Sem conexão ao vivo com o servidor; tentando de novo automaticamente…'
+      }
+    case 'stopped':
+      if (stopCode === 4409)
+        return {
+          label: 'Em outra aba',
+          title:
+            'As atualizações ao vivo foram assumidas por outra aba. Clique para trazê-las para cá.'
+        }
+      if (stopCode === 4001)
+        return {
+          label: 'Desatualizado',
+          title: 'Versão do site incompatível. Recarregue a página.'
+        }
+      return {
+        label: 'Desconectado',
+        title: 'Atualizações ao vivo paradas. Clique para reconectar.'
+      }
+    default:
+      return { label: 'Conectando', title: 'Conectando ao servidor…' }
+  }
+}
+
 function LiveDot() {
   const s = useSession((st) => st.socket)
+  const stopCode = useSession((st) => st.socketStopCode)
+  const reconnect = useSession((st) => st.reconnectSocket)
   const online = s === 'online'
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-[11.5px] text-subtle"
-      title={online ? 'Recebendo atualizações ao vivo' : 'Reconectando ao servidor…'}
-    >
+  const stopped = s === 'stopped'
+  const { label, title } = liveLabel(s, stopCode)
+  const content = (
+    <>
       <span
         className={cx(
           'size-1.5 rounded-full',
-          online ? 'bg-success' : 'animate-pulse-soft bg-warning'
+          online ? 'bg-success' : stopped ? 'bg-subtle' : 'animate-pulse-soft bg-warning'
         )}
       />
-      {online ? 'Ao vivo' : 'Reconectando'}
+      {label}
+    </>
+  )
+  const cls = 'inline-flex items-center gap-1.5 text-[11.5px] text-subtle'
+  if (stopped && stopCode !== 4001)
+    return (
+      <button
+        type="button"
+        className={cx(cls, 'rounded hover:text-fg')}
+        title={title}
+        data-testid="live-status"
+        data-status={s}
+        onClick={reconnect}
+      >
+        {content}
+      </button>
+    )
+  return (
+    <span className={cls} title={title} data-testid="live-status" data-status={s} role="status">
+      {content}
     </span>
   )
 }

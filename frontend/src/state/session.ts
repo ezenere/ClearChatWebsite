@@ -9,7 +9,7 @@ import { type SocketStatus, SyncSocket } from '../api/ws'
 import { type Bytes, deriveSubkeys, type Subkeys, unlockWithPassword } from '../crypto'
 import { Repo } from '../data/repo'
 import { kekInWorker } from '../lib/kdf'
-import { emitChanges } from './live'
+import { emitChanges, emitResync } from './live'
 
 export type Phase = 'boot' | 'anon' | 'needs_setup' | 'locked' | 'unlocked'
 
@@ -30,6 +30,10 @@ interface SessionState {
   keys: KeysResponse | null
   vault: Vault | null
   socket: SocketStatus
+  /** Código do fechamento que parou o socket (4409 outra aba, 4001 protocolo…), quando parado. */
+  socketStopCode: number | null
+  /** Reinicia o WebSocket depois de um fechamento terminal (ex.: 4409, a pedido do usuário). */
+  reconnectSocket: () => void
   lockReason: LockReason
   /** Motivo de uma saída forçada (dispositivo revogado, conta apagada…), para mostrar no login. */
   endedReason: string | null
@@ -47,6 +51,9 @@ interface SessionState {
 }
 
 let socket: SyncSocket | null = null
+/** Já recebeu um `welcome` nesta sessão? (o próximo é reconexão → recarregar as listas) */
+let welcomed = false
+let netHooks = false
 /** Depois de `keys.reset` o servidor fecha a conexão com 4403 — mas a sessão continua válida. */
 let keysResetAt = 0
 
@@ -59,6 +66,15 @@ function wipe(v: Vault | null): void {
 export const useSession = create<SessionState>((set, get) => {
   const startSocket = () => {
     if (socket) return
+    if (!netHooks && typeof window !== 'undefined') {
+      // voltou a rede / a aba voltou a ficar visível: não espera o backoff
+      netHooks = true
+      window.addEventListener('online', () => socket?.retryNow())
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') socket?.retryNow()
+      })
+    }
+    set({ socketStopCode: null })
     socket = new SyncSocket({
       url: wsUrl(),
       factory: getSocketFactory(),
@@ -66,6 +82,7 @@ export const useSession = create<SessionState>((set, get) => {
       refresh: () => api().refresh(),
       onStatus: (s) => set({ socket: s }),
       onFatal: (code) => {
+        set({ socketStopCode: code })
         if (code !== 4403) return
         if (Date.now() - keysResetAt < 30_000) {
           socket = null
@@ -75,7 +92,10 @@ export const useSession = create<SessionState>((set, get) => {
         get().endSession('Sua sessão foi encerrada neste dispositivo.')
       },
       onEvent: (ev) => {
-        if (ev.t === 'sync.changes') emitChanges(ev.changes)
+        if (ev.t === 'welcome') {
+          if (welcomed) emitResync()
+          welcomed = true
+        } else if (ev.t === 'sync.changes') emitChanges(ev.changes)
         else if (ev.t === 'keys.changed') void get().refreshKeys()
         else if (ev.t === 'keys.reset') {
           keysResetAt = Date.now()
@@ -89,6 +109,7 @@ export const useSession = create<SessionState>((set, get) => {
   const stopSocket = () => {
     socket?.stop()
     socket = null
+    welcomed = false
   }
 
   return {
@@ -100,6 +121,7 @@ export const useSession = create<SessionState>((set, get) => {
     keys: null,
     vault: null,
     socket: 'idle',
+    socketStopCode: null,
     lockReason: null,
     endedReason: null,
     lastActivity: Date.now(),
@@ -222,6 +244,13 @@ export const useSession = create<SessionState>((set, get) => {
         lockReason: null,
         endedReason: reason
       })
+    },
+
+    reconnectSocket: () => {
+      if (get().phase === 'anon') return
+      socket?.stop()
+      socket = null
+      startSocket() // `welcomed` fica: o welcome seguinte recarrega as listas
     },
 
     touch: () => set({ lastActivity: Date.now() })
