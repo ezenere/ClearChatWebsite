@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.1.1** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
+> **Versão do protocolo: 1.2.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -295,9 +295,12 @@ Não existe em v1. Espaço deixado: `k` no envelope, `key_version` na AAD da wra
 | `blobs.json` | blobs CCB1 (3 chunks, chunks exatos, vazio), `blob_id` |
 | `realtime.json` | envelopes de evento ao vivo, comando remoto e resultado |
 | `ids.json` | ids derivados de skill e de blob |
+| `branches.json` | árvore de versões das mensagens (§4.3.8): mãe efetiva, caminho ativo e irmãos — **escrito à mão** (dados de teste compartilhados, não é cripto nem saída do `generate.ts`) |
 
 Rodar: `cd docs/test-vectors && npm install && node generate.ts --check` (falha se algum JSON divergir).
 Os vetores foram conferidos contra implementações independentes (libargon2 e `cryptography` do Python).
+O `generate.ts` não gera nem confere o `branches.json`: ele é editado à mão (idêntico nos dois
+repositórios) e todo cliente que mostra conversas (app, site, mobile) DEVE passar em todos os casos.
 
 ---
 
@@ -345,7 +348,7 @@ apagar `memory_collection` remove os `memory` com `scope = collection_id` (§7.7
 
 Todo plaintext é um objeto JSON com `sv` (versão do esquema do tipo, hoje `1`). Os tipos referenciados
 (`ChatConfig`, `ApiMessage`, `MessageMeta`, `MemoryConfig`, `SkillsConfig`, `EngineConfig`…) são
-**exatamente** os de `src/shared/*.ts` do app na versão 0.5.x. Leitores DEVEM ignorar campos
+**exatamente** os de `src/shared/*.ts` do app na versão 0.7.x. Leitores DEVEM ignorar campos
 desconhecidos e DEVEM preservá-los ao regravar (merge por campo); escritores NÃO DEVEM enviar `undefined`.
 
 #### 4.3.1 `provider`
@@ -423,25 +426,85 @@ raiz) só para exibir avisos ("diretório raiz /home/x/proj no PC") — nunca é
 { sv: 1, chatId: string, parentSessionId: string | null, parentToolCallId: string | null,
   depth: 0 | 1 | 2, model: string, providerId: string | null, title: string, task: string | null,
   status: SessionStatus, createdAt: number,
-  memory: { snapshot?: { at: number, key: string, index: string }, lastExtractedSeq?: number } | null }
+  memory: { snapshot?: { at: number, key: string, index: string }, lastExtractedSeq?: number } | null,
+  branchSel?: { [parentKey: string]: string | null } }   // desde 1.2.0; parentKey = id da mãe ou "root"
 ```
-Mapeia `sessions` (+ `memory_json` → `memory`). O snapshot do índice de memória é sincronizado de
+Mapeia `sessions` (+ `memory_json` → `memory`, `branch_sel_json` → `branchSel`). O snapshot do índice de memória é sincronizado de
 propósito: o próximo host continua com o mesmo prefixo (cache do provedor) e não re-extrai mensagens.
 Status transitórios (`running`, `waiting`, `awaiting_approval`, `awaiting_input`, `awaiting_retry`)
 PODEM ser gravados; leitores DEVEM exibi-los como `interrupted` quando o chat não tiver janela de escrita
 aberta (§8). Ao abrir uma janela, o host DEVERIA normalizar status transitórios velhos (como o
 `markStaleInterrupted` do app) e enviar.
 
+`branchSel` (desde 1.2.0) = a versão escolhida em cada bifurcação da árvore de mensagens desta sessão
+(algoritmo na §4.3.8). Chave = id da mensagem mãe, ou `"root"` para as mensagens sem mãe (escritores NÃO
+DEVEM usar `root` como id de mensagem); valor = id do filho escolhido, ou `null` = "o caminho termina
+nesta mãe" (estado transitório: um regenerar cuja nova resposta ainda não existe). Chave ausente ou
+filho que não existe (ainda não chegou, apagado, não é filho dessa mãe) → o filho mais novo. O mapa só
+guarda desvios do padrão: um chat linear tem `{}`, anexar mensagens não muda nada, criar uma versão
+nova apaga a chave da mãe (a nova já é a mais nova) e voltar para a versão mais nova também.
+- Escritores ≥ 1.2.0 DEVEM **sempre** enviar `branchSel` (`{}` quando vazio): a regravação mescla com o
+  plaintext anterior (campos desconhecidos são preservados, §4.3), então omitir traria de volta uma
+  seleção velha. Ausente (escritor < 1.2.0) = `{}`.
+- É conteúdo do chat: só o host grava, dentro de uma janela (§8.4). Trocar de versão = nova revisão do
+  `session` só com `branchSel` alterado (nenhuma mensagem muda); criar uma versão manda a mensagem nova
+  e o `session` no **mesmo** lote. Num controle remoto, trocar vira o comando `branch.select` (§8.6).
+- Quem não pode gravar o conteúdo (o site; dispositivos com o chat divergente ou sem janela) PODE trocar
+  de versão **só na tela** (sem gravar nada), partindo do `branchSel` sincronizado.
+
 #### 4.3.8 `message`
 
 ```ts
-{ sv: 1, sessionId: string, seq: number, message: ApiMessage, meta: MessageMeta, createdAt: number }
+{ sv: 1, sessionId: string, seq: number, message: ApiMessage, meta: MessageMeta, createdAt: number,
+  parentId?: string | null }   // desde 1.2.0: mensagem anterior no mesmo ramo; null = raiz
 ```
-Mapeia `messages(id, session_id, seq, message_json, meta_json, created_at)`. Mensagens **não** são
-append-only no app (editar, apagar, regenerar, `insertAt` da compactação desloca `seq`): toda mutação é
+Mapeia `messages(id, session_id, seq, message_json, meta_json, created_at, parent_id)`. Mensagens **não**
+são append-only no app (editar, apagar, `insertAt` da compactação desloca `seq`): toda mutação é
 uma nova revisão do registro, e todas acontecem no host (§8). O `seq` dentro do plaintext é a posição
 na sessão (não confundir com o `seq` do servidor). Referências a anexos (`clearchat-attachment://…`)
 ficam como estão (§14).
+
+**Árvore de versões (desde 1.2.0).** As mensagens de uma sessão formam uma árvore: `parentId` = id da
+mensagem anterior no mesmo ramo, na mesma sessão; `null` = raiz. Editar uma mensagem digitada pelo
+usuário cria uma **irmã** (mesma mãe) e regenerar cria um novo filho da mensagem que abre o turno — a
+versão antiga continua salva. Clientes a partir do app 0.7 DEVEM sempre escrever `parentId` (`null`
+explícito na raiz). **Invariante:** `seq(mãe) < seq(filho)`, então `seq` continua uma ordem topológica
+(todo caminho cresce em `seq`) e `#seq` continua identificando a mensagem na sessão (`read_history`,
+`summaryOf` da compactação); num caminho os `seq` podem ter lacunas. Uma versão nova recebe
+`seq = máximo da sessão + 1`; o `insertAt` da compactação desloca `seq` sem quebrar a invariante (o
+marco fica com a mãe da primeira mensagem pendente e passa a ser a mãe dela); apagar uma mensagem
+passa os filhos dela para a mãe dela (novas revisões dos filhos e, se a seleção mudar, do `session`).
+Subsessões (subagentes) continuam lineares.
+
+Algoritmo normativo (o mesmo em app, site e mobile; casos em `docs/test-vectors/branches.json`):
+- **Ordem da sessão**: por `seq` crescente; empate (só em estados transitórios) por `id` (comparação
+  de strings ASCII).
+- **Mãe efetiva** de m: `parentId` se for `null` (raiz) ou o id de uma mensagem existente da **mesma
+  sessão** com `seq < m.seq`. Senão — `parentId` ausente (registro de cliente < 0.7), mãe que ainda não
+  chegou, apagada, de outra sessão ou que quebra a invariante — a mãe é **derivada**: a mensagem da
+  mesma sessão com o maior `seq` menor que `m.seq` (empate: maior `id`); nenhuma → raiz. A derivação é
+  só na leitura: o leitor NÃO DEVE regravar o registro por causa dela.
+- **Filhos** de `k` (`k` = id de mensagem, ou `"root"`) = mensagens cuja mãe efetiva é `k`, na ordem
+  da sessão; o **mais novo** é o último.
+- **Caminho ativo** (`activePath(mensagens, branchSel)`):
+  ```
+  caminho = []; k = "root"
+  enquanto filhos(k) não for vazio:
+    se k ∈ branchSel e branchSel[k] === null: pare        // o caminho termina em k
+    se k ∈ branchSel e branchSel[k] ∈ filhos(k): m = branchSel[k]
+    senão: m = o mais novo de filhos(k)                   // padrão (inclui seleção velha/desconhecida)
+    caminho.push(m); k = m.id
+  ```
+  O histórico mandado ao modelo, a tela e o "último turno" usam só o caminho ativo; as outras versões
+  ficam guardadas.
+- **Irmãos** de m = filhos da mãe efetiva de m: `{ index, count }` (`index` a partir de 0, na ordem da
+  sessão). O seletor de versão (‹ i/n ›) aparece nas mensagens do caminho com `count > 1`.
+
+Leitores < 1.2.0 ignoram `parentId`/`branchSel` e mostram todas as versões intercaladas por `seq` (nada
+se perde); ao regravar, o merge com a base (§4.3) preserva os dois campos. Uma mensagem escrita por um
+cliente antigo (sem `parentId`) vira filha da anterior por `seq`. O app preenche localmente o
+`parent_id` das mensagens que já tinha (`migration.messageTree`, §4.4) **sem reenviá-las**: os outros
+leitores derivam a mesma mãe.
 
 #### 4.3.9 `skill`
 
@@ -460,7 +523,7 @@ Ver §13 (formato do bundle).
 | `cwd` opcional das personas | `presets.config_json.cwd` | idem |
 | `defaultCwd` | `settings` | pasta padrão desta máquina |
 | `skillsSettings` (locais de skills, `projectSkills`) | `settings` | pastas desta máquina |
-| `presetsSeeded`, `migration.*` (`toolShellRename`, `approvalModes`, `smartApproveItems`, `searchIndex`) | `settings` | estado de migração local |
+| `presetsSeeded`, `migration.*` (`toolShellRename`, `approvalModes`, `smartApproveItems`, `searchIndex`, `messageTree`) | `settings` | estado de migração local |
 | índices FTS (`message_search`, `messages_fts`, `memories_fts`) | SQLite | derivados; reconstruídos localmente |
 | fila da sessão (`QueuedMessage`), aprovações/questionários/retries pendentes, processos em segundo plano | memória do main | estado de execução do host (vai ao vivo pelo stream, §11) |
 | arquivos do store de anexos | `userData/attachments` | sincronizados como blobs (§14), mas o store é local |
@@ -580,7 +643,7 @@ Clientes chamam antes de login (validação do servidor escolhido) e a cada cone
 (landing, "Criar conta", captcha).
 ```json
 { "name": "ClearChat", "server_version": "0.1.0", "base_url": "https://clear.ezenere.com",
-  "protocol": { "min": 1, "max": 1, "version": "1.1.1" },
+  "protocol": { "min": 1, "max": 1, "version": "1.2.0" },
   "features": {
     "signupOpen": true,
     "captcha": { "provider": "turnstile", "siteKey": "0x4AAAA…" },
@@ -955,8 +1018,8 @@ Falhas (verificadas nesta ordem):
   por REST com o WS caído) → `chat_busy` (tentar de novo quando a janela fechar / o WS voltar; se nesse
   meio-tempo o `head` avançar, vira divergência, que é o correto).
 
-Toda mutação de conteúdo **online** (rodar turno, editar/apagar mensagem, regenerar, compactar, extrair
-memórias — que grava a mensagem de extração) acontece **no host, dentro de uma janela**. Num controle
+Toda mutação de conteúdo **online** (rodar turno, editar/apagar mensagem, regenerar, trocar de versão —
+`branchSel`, §4.3.7 —, compactar, extrair memórias — que grava a mensagem de extração) acontece **no host, dentro de uma janela**. Num controle
 remoto, essas ações viram comandos (§8.6).
 
 ### 8.5 Turno normal no host
@@ -978,6 +1041,8 @@ envia; se alguém assumiu e rodou nesse meio-tempo, diverge.
 
 Controle remoto → `remote.send` → servidor → host (`remote.command`) → host executa → `remote.result`
 → servidor → quem enviou. Payload cifrado com `K_stream` e AAD de comando (§3.10); `kind` em claro.
+O servidor só repassa os `kind` desta tabela (outro → `invalid_request`), então um `kind` novo exige o
+servidor atualizado antes dos clientes.
 
 | `kind` | Plaintext (`sv: 1` + …) | Equivalente no app |
 |---|---|---|
@@ -991,17 +1056,33 @@ Controle remoto → `remote.send` → servidor → host (`remote.command`) → h
 | `smart_override` | `{ messageId }` | `agent.smartOverride` |
 | `question` | `{ requestId, answers?: QuestionAnswer[], cancel?: true }` | `questions.answer` / `cancel` |
 | `retry` | `{ requestId, action: 'retry'\|'cancel' }` | `retries.retry` / `cancel` |
-| `regenerate` | `{ sessionId }` | `agent.regenerate` |
-| `message.edit` | `{ messageId, message: ApiMessage }` | `messages.update` |
+| `regenerate` | `{ sessionId }` | `agent.regenerate` (desde 1.2.0: nova versão da resposta do último turno, como `branch.regenerate` sem `messageId`) |
+| `message.edit` | `{ messageId, message: ApiMessage }` | `messages.update` (edição no lugar; ver regras) |
 | `message.delete` | `{ messageId }` | `messages.delete` |
 | `compact` | `{ sessionId, opts?: CompactOptions }` | `agent.compact` |
 | `memory.extract` | `{ sessionId }` | `memory.extractNow` |
+| `branch.edit` | `{ messageId, message: ApiMessage }` | `agent.editBranch` (desde 1.2.0: nova versão de uma mensagem do usuário — irmã com a mesma mãe — e roda o turno) |
+| `branch.regenerate` | `{ sessionId, messageId? }` | `agent.regenerate(sessionId, messageId?)` (desde 1.2.0: nova versão da resposta do turno que contém `messageId`; sem ele, o último turno) |
+| `branch.select` | `{ messageId }` | `agent.selectBranch` (desde 1.2.0: torna `messageId` a versão ativa — grava `branchSel`, §4.3.7) |
 
 Regras:
 - `skills`: nomes; o **host** resolve e lê o `SKILL.md` (as skills que valem são as do host — o host
   publica a lista no snapshot do stream, §11, para a lâmpada do controle remoto).
 - `attachments`: o controle remoto sobe os blobs **antes** de enviar; o host baixa pelo sha256 (§14)
   antes de aceitar. Falta blob → `rejected` com `error: 'attachment_missing'`.
+- **Versões (desde 1.2.0)**: `branch.edit`, `branch.regenerate` e `branch.select` são comandos de
+  conteúdo como `message.edit`/`regenerate`: o host os executa dentro de uma janela (`purpose: 'run'`
+  para `branch.edit`/`branch.regenerate`, que rodam um turno; `'edit'` para `branch.select`) e grava as
+  revisões nela (§8.4). O host recusa (`rejected`) trocar de versão com a sessão ocupada (rodando,
+  esperando aprovação/resposta/retry) ou com um subagente em segundo plano iniciado abaixo da bifurcação
+  ainda rodando. `regenerate` (sem prefixo) passa a significar o regenerar **em ramo** do último turno —
+  nada é apagado. Um host ≥ 1.2.0 (app 0.7) **recusa `message.edit`** numa mensagem digitada pelo
+  usuário da sessão principal (role `user`, não sintética, sem `kind` ou `queued`/`forced`), com `error`
+  em texto pedindo para atualizar o app, para um controle remoto antigo não sobrescrever o histórico;
+  as outras mensagens (assistente, sintéticas, entre chats, marco de compactação) continuam com
+  `message.edit`. Controles remotos ≥ 1.2.0 DEVEM mandar `branch.edit` para mensagens do usuário e
+  `branch.regenerate` (nunca `regenerate`): um host antigo recusa o kind desconhecido em vez de apagar
+  as outras versões. O site não manda comandos: nele, trocar de versão é só na tela (§4.3.7).
 - **Só com o host online** (`host.status = online`): com host `grace`/`offline` → erro `host_offline` na
   hora; sem host → `no_host` (quem pode hospedar roda localmente, §8.7). Nada é guardado no servidor.
 - Entrega **no máximo uma vez**: o servidor mantém o comando só em memória, enquanto espera o resultado.
@@ -1801,6 +1882,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 | 1.0.0 | 2026-10-19 | Contrato inicial (cripto, registros, REST, WebSocket, host de execução, divergência, merge, skills, anexos, instância/self-host, gateway reservado). |
 | 1.1.0 | 2026-10-19 | Adições compatíveis: `quota_exceeded` com `details.kind: 'chat_states'` — teto de estados de chat por usuário em `host.begin`/`host.takeover`/`host.pin` ao criar o estado de um chat (§7.10, §8.3, §8.8, §8.9, §10.4, §17.2, §17.4); `records/fetch`/`sync.fetch` com o orçamento de ~8 MiB por resposta, o cliente pede de novo os `omitted: true` até acabarem (§6.7, §7.2, §10.4). Texto: §17.3 — `code/verify` limitado por e-mail + rede do cliente (teto de 200/h por e-mail), bloqueio contando só erros contra um código vivo, código não enviado para o bloqueio não revelar contas, limite de 10/h para troca de wrap; §5.4 — reuso vale para qualquer refresh já rotacionado. |
 | 1.1.1 | 2026-10-19 | Texto (sem mudança de formato): §8.3/§8.4/§9.1 — `chat_bases[X] < head(X)` só marca divergência se houver conteúdo de X com `seq > base` escrito por outro dispositivo; se tudo depois da base é do próprio remetente (ex.: chat novo enviado em vários lotes com a mesma base), o push segue como `b == head`. `divergence_discarded` continua checado antes. |
+| 1.2.0 | 2026-10-19 | Adições compatíveis — versões de mensagens (ramos): `message.parentId?` (mãe no mesmo ramo; ausente = derivada como a anterior por `seq`) com o algoritmo normativo do caminho ativo e dos irmãos e a invariante `seq(mãe) < seq` (§4.3.8); `session.branchSel?` (versão escolhida por bifurcação, sempre enviado, `{}` quando vazio; `null` = caminho termina ali) (§4.3.7); comandos `branch.edit`, `branch.regenerate`, `branch.select` (§8.6), com `regenerate` virando regenerar em ramo e o host 0.7 recusando `message.edit` em mensagem digitada pelo usuário na sessão principal; trocar de versão entra nas mutações de conteúdo (§8.4); `migration.messageTree` local (§4.4); site troca de versão só na tela; fixture `docs/test-vectors/branches.json` escrito à mão (§3.15); tipos de referência do app 0.7.x (§4.3). |
 
 ---
 

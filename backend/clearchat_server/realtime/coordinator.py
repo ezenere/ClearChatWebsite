@@ -57,6 +57,9 @@ COMMAND_KINDS = {
     "message.delete",
     "compact",
     "memory.extract",
+    "branch.edit",
+    "branch.regenerate",
+    "branch.select",
 }
 COMMAND_MAX_BYTES = 1024 * 1024
 STREAM_MAX_BYTES = 256 * 1024

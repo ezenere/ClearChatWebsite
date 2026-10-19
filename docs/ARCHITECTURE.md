@@ -370,7 +370,7 @@ As interpretações adotadas durante a implementação (corpos de resposta de `/
 `divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
 tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
 sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
-`docs/SYNC_PROTOCOL.md` (v1.1.1, ainda não lançado) — vale o que está lá.
+`docs/SYNC_PROTOCOL.md` (v1.2.0, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 

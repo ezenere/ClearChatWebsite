@@ -147,6 +147,28 @@ async def test_remote_command_relay(srv):
     assert (await cb.err("remote.send", chat_id="c1", cmd_id="x", kind="send", env=big))["code"] == "payload_too_large"
 
 
+async def test_remote_branch_commands_relay(srv):
+    # protocolo 1.2.0 (§8.6): versões de mensagens; o servidor só repassa kinds conhecidos
+    a, b, ca, cb = await setup(srv)
+    await ca.ack("host.begin", chat_id="c1", epoch=None, purpose="run")
+    await ca.ack("host.end", chat_id="c1", epoch=1)
+    for i, kind in enumerate(("branch.edit", "branch.regenerate", "branch.select")):
+        e = env()
+        r = await cb.ack("remote.send", chat_id="c1", cmd_id=f"br-{i}", kind=kind, env=e)
+        assert r["status"] == "delivered"
+        cmd = await ca.event("remote.command")
+        assert cmd["cmd_id"] == f"br-{i}" and cmd["kind"] == kind and cmd["env"] == e
+        assert cmd["from_device_id"] == b.device_id
+        res_env = env()
+        await ca.ack("remote.result", chat_id="c1", cmd_id=f"br-{i}", env=res_env)
+        res = await cb.event("remote.result")
+        assert res == {"t": "remote.result", "chat_id": "c1", "cmd_id": f"br-{i}", "env": res_env}
+    for kind in ("branch.delete", "branch", "BRANCH.EDIT"):
+        e = await cb.err("remote.send", chat_id="c1", cmd_id="x", kind=kind, env=env())
+        assert e["code"] == "invalid_request" and (e.get("details") or {}).get("field") == "kind"
+    await ca.no_event("remote.command")
+
+
 async def test_remote_command_timeout(srv):
     a, b, ca, cb = await setup(srv)
     await ca.ack("host.begin", chat_id="c1", epoch=None, purpose="run")

@@ -1,0 +1,367 @@
+{
+  "protocol_version": 1,
+  "note": "Escrito à mão (NÃO gerado por generate.ts). Idêntico em ClearChat e ClearChatWebsite. Algoritmo: SYNC_PROTOCOL.md §4.3.8 (mãe efetiva, filhos, caminho ativo, irmãos); branchSel: §4.3.7.",
+  "description": "Árvore de versões das mensagens de UMA sessão. Entrada: messages (id, seq e parentId; parentId ausente = registro de cliente antigo) em qualquer ordem e branchSel do registro session. Saída esperada: parents (mãe efetiva de cada mensagem; null = raiz), path (ids do caminho ativo, da raiz à folha) e siblings (por mensagem: index a partir de 0 na ordem da sessão e count de irmãos, ela inclusa).",
+  "cases": [
+    {
+      "name": "linear legado (sem parentId): mãe = anterior por seq",
+      "messages": [
+        { "id": "m1", "seq": 1 },
+        { "id": "m2", "seq": 2 },
+        { "id": "m3", "seq": 3 }
+      ],
+      "branchSel": {},
+      "parents": { "m1": null, "m2": "m1", "m3": "m2" },
+      "path": ["m1", "m2", "m3"],
+      "siblings": {
+        "m1": { "index": 0, "count": 1 },
+        "m2": { "index": 0, "count": 1 },
+        "m3": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "linear com parentId, fora de ordem e com lacunas de seq",
+      "messages": [
+        { "id": "c", "seq": 9, "parentId": "b" },
+        { "id": "a", "seq": 1, "parentId": null },
+        { "id": "b", "seq": 4, "parentId": "a" }
+      ],
+      "branchSel": {},
+      "parents": { "a": null, "b": "a", "c": "b" },
+      "path": ["a", "b", "c"],
+      "siblings": {
+        "a": { "index": 0, "count": 1 },
+        "b": { "index": 0, "count": 1 },
+        "c": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "mensagem do usuário editada: padrão = versão mais nova",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "u2b", "seq": 5, "parentId": "a1" },
+        { "id": "a2b", "seq": 6, "parentId": "u2b" }
+      ],
+      "branchSel": {},
+      "parents": { "u1": null, "a1": "u1", "u2": "a1", "a2": "u2", "u2b": "a1", "a2b": "u2b" },
+      "path": ["u1", "a1", "u2b", "a2b"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 1 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2b": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "mensagem do usuário editada: versão antiga selecionada",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "u2b", "seq": 5, "parentId": "a1" },
+        { "id": "a2b", "seq": 6, "parentId": "u2b" }
+      ],
+      "branchSel": { "a1": "u2" },
+      "parents": { "u1": null, "a1": "u1", "u2": "a1", "a2": "u2", "u2b": "a1", "a2b": "u2b" },
+      "path": ["u1", "a1", "u2", "a2"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 1 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2b": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "seleção velha: filho inexistente ou que não é filho dessa mãe → mais novo",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "u2b", "seq": 5, "parentId": "a1" },
+        { "id": "a2b", "seq": 6, "parentId": "u2b" }
+      ],
+      "branchSel": { "a1": "a2", "u2b": "nao-existe", "sumiu": "u2" },
+      "parents": { "u1": null, "a1": "u1", "u2": "a1", "a2": "u2", "u2b": "a1", "a2b": "u2b" },
+      "path": ["u1", "a1", "u2b", "a2b"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 1 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2b": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "regenerar em andamento: null termina o caminho na mãe",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" }
+      ],
+      "branchSel": { "u1": null },
+      "parents": { "u1": null, "a1": "u1" },
+      "path": ["u1"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "null numa mãe sem filhos não muda nada",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" }
+      ],
+      "branchSel": { "a1": null },
+      "parents": { "u1": null, "a1": "u1" },
+      "path": ["u1", "a1"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "respostas regeneradas e edição em dois níveis",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "a2b", "seq": 5, "parentId": "u2" },
+        { "id": "u2b", "seq": 6, "parentId": "a1" },
+        { "id": "a2c", "seq": 7, "parentId": "u2b" }
+      ],
+      "branchSel": { "a1": "u2" },
+      "parents": {
+        "u1": null,
+        "a1": "u1",
+        "u2": "a1",
+        "a2": "u2",
+        "a2b": "u2",
+        "u2b": "a1",
+        "a2c": "u2b"
+      },
+      "path": ["u1", "a1", "u2", "a2b"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 2 },
+        "a2b": { "index": 1, "count": 2 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2c": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "seleção em dois níveis",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "a2b", "seq": 5, "parentId": "u2" },
+        { "id": "u2b", "seq": 6, "parentId": "a1" },
+        { "id": "a2c", "seq": 7, "parentId": "u2b" }
+      ],
+      "branchSel": { "a1": "u2", "u2": "a2" },
+      "parents": {
+        "u1": null,
+        "a1": "u1",
+        "u2": "a1",
+        "a2": "u2",
+        "a2b": "u2",
+        "u2b": "a1",
+        "a2c": "u2b"
+      },
+      "path": ["u1", "a1", "u2", "a2"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 2 },
+        "a2b": { "index": 1, "count": 2 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2c": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "seleção fora do caminho é ignorada",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "a2b", "seq": 5, "parentId": "u2" },
+        { "id": "u2b", "seq": 6, "parentId": "a1" },
+        { "id": "a2c", "seq": 7, "parentId": "u2b" }
+      ],
+      "branchSel": { "u2": "a2" },
+      "parents": {
+        "u1": null,
+        "a1": "u1",
+        "u2": "a1",
+        "a2": "u2",
+        "a2b": "u2",
+        "u2b": "a1",
+        "a2c": "u2b"
+      },
+      "path": ["u1", "a1", "u2b", "a2c"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 2 },
+        "a2b": { "index": 1, "count": 2 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2c": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "primeira mensagem editada: várias raízes, padrão = mais nova",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u1b", "seq": 3, "parentId": null },
+        { "id": "a1b", "seq": 4, "parentId": "u1b" }
+      ],
+      "branchSel": {},
+      "parents": { "u1": null, "a1": "u1", "u1b": null, "a1b": "u1b" },
+      "path": ["u1b", "a1b"],
+      "siblings": {
+        "u1": { "index": 0, "count": 2 },
+        "a1": { "index": 0, "count": 1 },
+        "u1b": { "index": 1, "count": 2 },
+        "a1b": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "primeira mensagem editada: raiz antiga selecionada com a chave root",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u1b", "seq": 3, "parentId": null },
+        { "id": "a1b", "seq": 4, "parentId": "u1b" }
+      ],
+      "branchSel": { "root": "u1" },
+      "parents": { "u1": null, "a1": "u1", "u1b": null, "a1b": "u1b" },
+      "path": ["u1", "a1"],
+      "siblings": {
+        "u1": { "index": 0, "count": 2 },
+        "a1": { "index": 0, "count": 1 },
+        "u1b": { "index": 1, "count": 2 },
+        "a1b": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "null na raiz: caminho vazio",
+      "messages": [{ "id": "u1", "seq": 1, "parentId": null }],
+      "branchSel": { "root": null },
+      "parents": { "u1": null },
+      "path": [],
+      "siblings": { "u1": { "index": 0, "count": 1 } }
+    },
+    {
+      "name": "sessão vazia",
+      "messages": [],
+      "branchSel": {},
+      "parents": {},
+      "path": [],
+      "siblings": {}
+    },
+    {
+      "name": "mãe inválida (não chegou, ela mesma, seq maior ou igual) → anterior por seq",
+      "messages": [
+        { "id": "m1", "seq": 1, "parentId": null },
+        { "id": "m2", "seq": 2, "parentId": "ainda-nao-chegou" },
+        { "id": "m3", "seq": 5, "parentId": "m4" },
+        { "id": "m4", "seq": 7, "parentId": "m3" },
+        { "id": "m5", "seq": 8, "parentId": "m5" }
+      ],
+      "branchSel": {},
+      "parents": { "m1": null, "m2": "m1", "m3": "m2", "m4": "m3", "m5": "m4" },
+      "path": ["m1", "m2", "m3", "m4", "m5"],
+      "siblings": {
+        "m1": { "index": 0, "count": 1 },
+        "m2": { "index": 0, "count": 1 },
+        "m3": { "index": 0, "count": 1 },
+        "m4": { "index": 0, "count": 1 },
+        "m5": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "cliente antigo anexou depois de uma edição: filha da anterior por seq",
+      "messages": [
+        { "id": "u1", "seq": 1, "parentId": null },
+        { "id": "a1", "seq": 2, "parentId": "u1" },
+        { "id": "u2", "seq": 3, "parentId": "a1" },
+        { "id": "a2", "seq": 4, "parentId": "u2" },
+        { "id": "u2b", "seq": 5, "parentId": "a1" },
+        { "id": "a2b", "seq": 6, "parentId": "u2b" },
+        { "id": "x", "seq": 7 }
+      ],
+      "branchSel": { "a1": "u2" },
+      "parents": {
+        "u1": null,
+        "a1": "u1",
+        "u2": "a1",
+        "a2": "u2",
+        "u2b": "a1",
+        "a2b": "u2b",
+        "x": "a2b"
+      },
+      "path": ["u1", "a1", "u2", "a2"],
+      "siblings": {
+        "u1": { "index": 0, "count": 1 },
+        "a1": { "index": 0, "count": 1 },
+        "u2": { "index": 0, "count": 2 },
+        "a2": { "index": 0, "count": 1 },
+        "u2b": { "index": 1, "count": 2 },
+        "a2b": { "index": 0, "count": 1 },
+        "x": { "index": 0, "count": 1 }
+      }
+    },
+    {
+      "name": "mais novo = maior seq, não a ordem da lista",
+      "messages": [
+        { "id": "r", "seq": 10, "parentId": null },
+        { "id": "c1", "seq": 20, "parentId": "r" },
+        { "id": "c2", "seq": 15, "parentId": "r" }
+      ],
+      "branchSel": {},
+      "parents": { "r": null, "c1": "r", "c2": "r" },
+      "path": ["r", "c1"],
+      "siblings": {
+        "r": { "index": 0, "count": 1 },
+        "c1": { "index": 1, "count": 2 },
+        "c2": { "index": 0, "count": 2 }
+      }
+    },
+    {
+      "name": "empate de seq (transitório): desempate por id",
+      "messages": [
+        { "id": "r", "seq": 1, "parentId": null },
+        { "id": "b", "seq": 2, "parentId": "r" },
+        { "id": "a", "seq": 2, "parentId": "r" },
+        { "id": "z", "seq": 3 }
+      ],
+      "branchSel": {},
+      "parents": { "r": null, "a": "r", "b": "r", "z": "b" },
+      "path": ["r", "b", "z"],
+      "siblings": {
+        "r": { "index": 0, "count": 1 },
+        "a": { "index": 0, "count": 2 },
+        "b": { "index": 1, "count": 2 },
+        "z": { "index": 0, "count": 1 }
+      }
+    }
+  ]
+}
