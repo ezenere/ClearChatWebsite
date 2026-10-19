@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}Entrar{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:60px auto">
+  <h1>Painel admin</h1>
+  <p class="muted">Acesso só local (127.0.0.1). Use o <code>ADMIN_TOKEN</code> do <code>.env</code>.</p>
+  {% if error %}<p class="danger">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <label>Token <input type="password" name="token" autocomplete="current-password" autofocus required></label>
+    <button>Entrar</button>
+  </form>
+</div>
+{% endblock %}

@@ -15,18 +15,30 @@ Instância oficial: https://clear.ezenere.com — qualquer pessoa pode hospedar 
 
 ## Estado
 
-Contrato definido; implementação ainda não começou. Estrutura:
+Backend, painel admin e site implementados (protocolo v1). Estrutura:
 
 | Pasta | Conteúdo |
 |---|---|
 | `docs/SYNC_PROTOCOL.md` | **o contrato** com os clientes (cripto, registros, REST, WebSocket, host de execução, divergência) — idêntico no repo do app |
 | `docs/test-vectors/` | implementação de referência (`generate.ts`) + vetores JSON — idênticos no repo do app |
 | `docs/ARCHITECTURE.md` | arquitetura do servidor: componentes, tabelas, rate limit, admin, deploy, Nginx, self-host |
-| `backend/` | API FastAPI (a implementar) |
+| `backend/` | API FastAPI + Postgres (REST `/api`, WebSocket `/ws`, host de execução, blobs, GC) — `make -C backend help` |
 | `frontend/` | site React + Vite (a implementar) |
-| `admin/` | painel admin, só em 127.0.0.1 (a implementar) |
+| `admin/` | painel admin (FastAPI + Jinja2), só em 127.0.0.1 |
 | `deploy/` | exemplo de Nginx e Caddyfile do perfil self-host |
-| `docker-compose.yml`, `.env.example` | esqueleto do deploy |
+| `docker-compose.yml`, `.env.example` | deploy (db, api, web, admin; perfil `edge` com Caddy) |
+
+## Backend: desenvolvimento
+
+```bash
+cd backend
+make venv && make init-env        # .venv + ../.env com segredos gerados (ajuste DATABASE_URL)
+make migrate && make dev          # api em http://127.0.0.1:8100 (códigos de login no log com MAIL_BACKEND=console)
+make admin                        # painel em http://127.0.0.1:8190 (ADMIN_TOKEN do .env)
+make check                        # ruff + mypy + pytest (TEST_DATABASE_URL: banco descartável, é apagado)
+```
+
+Detalhes em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §10.
 
 ## Vetores de teste
 

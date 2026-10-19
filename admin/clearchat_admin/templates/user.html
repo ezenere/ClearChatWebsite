@@ -1,0 +1,61 @@
+{% extends "base.html" %}{% block title %}{{ u.email }}{% endblock %}
+{% block content %}
+<h1>{{ u.email }} <span class="badge {{ 'banned' if u.status == 'banned' else '' }}">{{ u.status }}</span></h1>
+<div class="card">
+  <table>
+    <tr><th>Nome</th><td>{{ u.name }}</td><th>Criado</th><td>{{ u.created_at|dt }} ({{ u.created_by }})</td></tr>
+    <tr><th>Último acesso</th><td>{{ u.last_seen_at|dt }}</td><th>Chaves</th><td>{{ "configuradas" if u.keys_ready else "não configuradas" }} (rev {{ u.keys_rev }})</td></tr>
+    <tr><th>seq</th><td>{{ u.seq }}</td><th>Piso de tombstones</th><td>{{ u.tombstone_floor }}</td></tr>
+    {% if u.status == 'banned' %}<tr><th>Banido em</th><td>{{ u.banned_at|dt }}</td><th>Motivo</th><td>{{ u.banned_reason or "—" }}</td></tr>{% endif %}
+  </table>
+</div>
+<div class="card">
+  <h2>Armazenamento</h2>
+  <p class="muted">O conteúdo é cifrado no cliente: só tamanhos e tipos são visíveis.</p>
+  <table><tr><th>Tipo</th><th class="num">Registros</th><th class="num">Bytes</th></tr>
+  {% for r in by_type %}<tr><td>{{ r.type }}</td><td class="num">{{ r.n }}</td><td class="num">{{ r.bytes|human }}</td></tr>{% else %}<tr><td colspan="3" class="muted">Sem registros.</td></tr>{% endfor %}
+  <tr><td class="muted">tombstones</td><td class="num">{{ tomb.n }}</td><td></td></tr>
+  <tr><td><b>blobs</b></td><td class="num">{{ blobs.n }} ({{ blobs.orphans }} sem referência)</td><td class="num">{{ blobs.bytes|human }}</td></tr>
+  </table>
+</div>
+<div class="card">
+  <h2>Cotas</h2>
+  <p class="muted">Vazio = ilimitado. Uso atual: {{ u.usage_records }} registros, {{ u.usage_record_bytes|human }} de dados, {{ u.usage_blob_bytes|human }} de blobs.</p>
+  <form method="post" action="/users/{{ u.id }}/quotas" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Bytes de registros <input type="number" min="0" name="quota_record_bytes" value="{{ u.quota_record_bytes if u.quota_record_bytes is not none else '' }}"></label>
+    <label>Registros <input type="number" min="0" name="quota_records" value="{{ u.quota_records if u.quota_records is not none else '' }}"></label>
+    <label>Bytes de blobs <input type="number" min="0" name="quota_blob_bytes" value="{{ u.quota_blob_bytes if u.quota_blob_bytes is not none else '' }}"></label>
+    <label>Dispositivos <input type="number" min="0" name="quota_devices" value="{{ u.quota_devices if u.quota_devices is not none else '' }}"></label>
+    <button>Salvar cotas</button>
+  </form>
+</div>
+<div class="card">
+  <h2>Dispositivos</h2>
+  <table><tr><th>Nome</th><th>Plataforma</th><th>Cliente</th><th>Versão</th><th>Host?</th><th>Último acesso</th><th>IP</th><th>Estado</th></tr>
+  {% for d in devices %}<tr><td>{{ d.name }}</td><td>{{ d.platform }}</td><td>{{ d.client }}</td><td>{{ d.app_version }}</td><td>{{ "sim" if d.can_host else "não" }}</td><td>{{ d.last_seen_at|dt }}</td><td>{{ d.last_ip or "—" }}</td><td>{{ "revogado " ~ (d.revoked_at|dt) if d.revoked_at else "ativo" }}</td></tr>{% else %}<tr><td colspan="8" class="muted">Nenhum.</td></tr>{% endfor %}
+  </table>
+  <form method="post" action="/users/{{ u.id }}/revoke-devices" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Desconectar todos os dispositivos</button></form>
+</div>
+<div class="card">
+  <h2>Uso por dia (30 dias)</h2>
+  <table><tr><th>Dia</th><th class="num">Pushes</th><th class="num">Itens</th><th class="num">Bytes</th><th class="num">Uploads</th><th class="num">Bytes de blobs</th></tr>
+  {% for d in daily %}<tr><td>{{ d.day }}</td><td class="num">{{ d.pushes }}</td><td class="num">{{ d.push_items }}</td><td class="num">{{ d.push_bytes|human }}</td><td class="num">{{ d.blob_uploads }}</td><td class="num">{{ d.blob_bytes|human }}</td></tr>{% else %}<tr><td colspan="6" class="muted">Sem uso.</td></tr>{% endfor %}
+  </table>
+</div>
+<div class="card">
+  <h2>Atividade</h2>
+  <table><tr><th>Quando</th><th>Evento</th><th>IP</th><th>Detalhes</th></tr>
+  {% for a in activity %}<tr><td>{{ a.at|dt }}</td><td>{{ a.kind }}</td><td>{{ a.ip or "—" }}</td><td class="muted">{{ a.meta or "" }}</td></tr>{% else %}<tr><td colspan="4" class="muted">Nada.</td></tr>{% endfor %}
+  </table>
+</div>
+<div class="card">
+  <h2>Ações</h2>
+  {% if u.status == 'banned' %}
+  <form method="post" action="/users/{{ u.id }}/unban" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Desbanir</button></form>
+  {% else %}
+  <form method="post" action="/users/{{ u.id }}/ban" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="reason" placeholder="motivo (opcional)"><button class="danger">Banir (desconecta todos os dispositivos)</button></form>
+  {% endif %}
+  <form method="post" action="/users/{{ u.id }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="confirm_email" placeholder="digite {{ u.email }}" required><button class="danger">Apagar conta e todos os dados</button></form>
+</div>
+{% endblock %}

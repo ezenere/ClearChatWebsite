@@ -1,0 +1,136 @@
+"""Dispositivos e tokens (§5.4): access `cca_` (1 h) e refresh `ccr_` (60 d deslizante, rotacionado)."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from ..config import Settings
+from ..db import execute, fetchone
+from ..errors import ApiError
+from ..security import new_token, token_hash
+from ..util import utcnow
+
+
+@dataclass
+class Principal:
+    user_id: uuid.UUID
+    device_id: uuid.UUID
+    email: str
+    user_name: str
+    keys_ready: bool
+    device_name: str
+    platform: str
+    client: str
+    can_host: bool
+
+
+async def create_device(conn: AsyncConnection, user_id: uuid.UUID, device: dict[str, Any], ip: str | None) -> uuid.UUID:
+    row = await fetchone(
+        conn,
+        "INSERT INTO devices (user_id, name, platform, client, app_version, can_host, last_seen_at, last_ip) "
+        "VALUES (:u, :n, :p, :c, :v, :h, now(), CAST(:ip AS inet)) RETURNING id",
+        {
+            "u": user_id,
+            "n": device["name"],
+            "p": device["platform"],
+            "c": device["client"],
+            "v": device["app_version"],
+            "h": bool(device["can_host"]) and device["client"] != "web",
+            "ip": ip,
+        },
+    )
+    assert row is not None
+    return uuid.UUID(str(row.id))
+
+
+async def issue_tokens(
+    conn: AsyncConnection,
+    settings: Settings,
+    user_id: uuid.UUID,
+    device_id: uuid.UUID,
+    rotate_from: bytes | None = None,
+) -> dict[str, Any]:
+    """Cria um access token novo e um refresh novo (o anterior vira `refresh_prev_hash`)."""
+    access = new_token("cca_")
+    refresh = new_token("ccr_")
+    now = utcnow()
+    await execute(
+        conn,
+        "INSERT INTO access_tokens (token_hash, device_id, user_id, expires_at) VALUES (:h, :d, :u, :e)",
+        {
+            "h": token_hash(access),
+            "d": device_id,
+            "u": user_id,
+            "e": now + timedelta(seconds=settings.access_token_ttl_s),
+        },
+    )
+    await execute(
+        conn,
+        "UPDATE devices SET refresh_prev_hash = :prev, refresh_hash = :h, refresh_expires_at = :e WHERE id = :d",
+        {
+            "prev": rotate_from,
+            "h": token_hash(refresh),
+            "e": now + timedelta(days=settings.refresh_token_ttl_days),
+            "d": device_id,
+        },
+    )
+    return {
+        "access_token": access,
+        "access_expires_in": settings.access_token_ttl_s,
+        "refresh_token": refresh,
+        "refresh_expires_in": settings.refresh_token_ttl_days * 86400,
+    }
+
+
+async def authenticate(conn: AsyncConnection, token: str | None) -> Principal:
+    """Valida um access token. Erros: unauthorized (sem/expirado/inválido), device_revoked, account_disabled."""
+    if not token or not token.startswith("cca_") or len(token) > 100:
+        raise ApiError("unauthorized")
+    row = await fetchone(
+        conn,
+        "SELECT t.expires_at, t.user_id, t.device_id, u.email, u.name AS user_name, u.status, u.keys_ready, "
+        "d.name AS device_name, d.platform, d.client, d.can_host, d.revoked_at "
+        "FROM access_tokens t JOIN users u ON u.id = t.user_id JOIN devices d ON d.id = t.device_id "
+        "WHERE t.token_hash = :h",
+        {"h": token_hash(token)},
+    )
+    if row is None:
+        raise ApiError("unauthorized")
+    if row.revoked_at is not None:
+        raise ApiError("device_revoked")
+    if row.status != "active":
+        raise ApiError("account_disabled")
+    if row.expires_at <= utcnow():
+        raise ApiError("unauthorized", details={"reason": "expired"})
+    return Principal(
+        user_id=row.user_id,
+        device_id=row.device_id,
+        email=str(row.email),
+        user_name=row.user_name,
+        keys_ready=row.keys_ready,
+        device_name=row.device_name,
+        platform=row.platform,
+        client=row.client,
+        can_host=row.can_host,
+    )
+
+
+async def touch_device(conn: AsyncConnection, device_id: uuid.UUID, user_id: uuid.UUID, ip: str | None) -> None:
+    """Atualiza último acesso (no máximo 1×/min por dispositivo)."""
+    await execute(
+        conn,
+        "UPDATE devices SET last_seen_at = now(), last_ip = COALESCE(CAST(:ip AS inet), last_ip) "
+        "WHERE id = :d AND (last_seen_at IS NULL OR last_seen_at < now() - interval '60 seconds')",
+        {"d": device_id, "ip": ip},
+    )
+    await execute(
+        conn,
+        "UPDATE users SET last_seen_at = now() WHERE id = :u "
+        "AND (last_seen_at IS NULL OR last_seen_at < now() - interval '60 seconds')",
+        {"u": user_id},
+    )

@@ -51,22 +51,27 @@ Decisões:
 ```
 backend/            Python (pacote clearchat_server): app FastAPI da api
   clearchat_server/
-    main.py           # cria a app, monta rotas sob BASE_PATH, middlewares (IP real, logs)
+    main.py           # create_app(): rotas sob BASE_PATH, middlewares (IP real, logs), ciclo de vida
+    __main__.py       # `python -m clearchat_server serve` (uvicorn, 1 worker) ou comandos do cli.py
+    cli.py            # migrate, init-env, create-user, invite, settings, gc, healthcheck
     config.py         # lê o .env (pydantic-settings)
-    db/               # modelos SQLAlchemy, sessão, migrações Alembic (alembic/)
-    auth/             # códigos por e-mail, convites, tokens, dispositivos
-    keys/             # wraps, verifier
-    sync/             # push/pull, records, blobs, cascatas, cotas
-    realtime/         # hub WS, host coordinator, stream relay, comandos
+    context.py        # AppContext (engine, hub, coordenador, mailer, limiter…) em app.state.ctx
+    chatstate.py      # chat_states: ssq, travas, serialização ChatState
+    db/               # engine async (asyncpg) + SQL explícito; migrações Alembic (db/alembic/)
+    auth/             # códigos por e-mail, convites, tokens, dispositivos, conta, Turnstile
+    keys/             # wraps, verifier, key_proof, reset
+    sync/             # envelope (validação de formato), push/pull/divergência (records.py), blobs
+    realtime/         # hub WS (hub.py), coordenador de host + comandos + stream (coordinator.py), endpoint (ws.py)
     ratelimit/        # contadores Postgres, bloqueios
-    mail/             # SMTP + templates pt-BR
+    mail/             # SMTP (aiosmtplib) / console / memória + textos pt-BR
     instance/         # configurações da instância (/api/info)
-    jobs/             # GC e expirações (tarefas asyncio periódicas)
-  tests/
-  pyproject.toml, Dockerfile
+    services/         # operações de conta compartilhadas com o admin (revogar, banir, apagar, convites)
+    jobs/             # GC e expirações + ouvinte LISTEN/NOTIFY dos eventos do admin
+  tests/              # pytest (Postgres real, uvicorn em processo, WebSocket de verdade)
+  pyproject.toml, alembic.ini, Dockerfile, Makefile
 frontend/           React + Vite + TS (site)
   src/ … ; Dockerfile (build → nginx estático; gera config.js com PUBLIC_BASE_URL no start)
-admin/              FastAPI + Jinja2 (importa clearchat_server.db), Dockerfile
+admin/              clearchat_admin: FastAPI + Jinja2 (importa clearchat_server), Dockerfile (contexto = raiz)
 docs/               SYNC_PROTOCOL.md (compartilhado), ARCHITECTURE.md, test-vectors/ (compartilhado)
 deploy/             nginx.example.conf, edge.Caddyfile (perfil self-host com uma porta só)
 docker-compose.yml, .env.example
@@ -179,6 +184,7 @@ CREATE TABLE records (
   env_v       smallint, key_version smallint,
   nonce       bytea, ciphertext bytea,          -- NULL em tombstones
   size        integer NOT NULL DEFAULT 0,
+  blobs       text[] NOT NULL DEFAULT '{}',      -- cópia de record_blobs para montar o Change sem join
   device_id   uuid,                              -- quem escreveu (sem FK: dispositivo pode sumir)
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now(),
@@ -267,7 +273,19 @@ CREATE TABLE activity (
 );
 CREATE INDEX ON activity (user_id, at DESC);
 CREATE INDEX ON activity (at DESC);
+
+-- contadores diários de uso para o painel (sem conteúdo): um upsert por push/upload em vez de uma
+-- linha de activity a cada push (o host empurra a cada ~250 ms durante um turno)
+CREATE TABLE usage_daily (
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, day date NOT NULL,
+  pushes integer NOT NULL DEFAULT 0, push_items integer NOT NULL DEFAULT 0, push_bytes bigint NOT NULL DEFAULT 0,
+  blob_uploads integer NOT NULL DEFAULT 0, blob_bytes bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, day)
+);
 ```
+
+A migração inicial (`backend/clearchat_server/db/alembic/versions/0001_initial.py`) é exatamente este
+esquema (com nomes explícitos nos índices).
 
 ### 3.1 Transações e concorrência
 
@@ -281,6 +299,13 @@ CREATE INDEX ON activity (at DESC);
   AND type IN ('session','message')`, `DELETE FROM chat_states`, ajuste de uso. Coleção de
   memória: `DELETE … type='memory' AND scope_id=$2`.
 - **Uso**: `usage_*` ajustados na mesma transação (delta de `size`).
+- **Ordem das checagens do push** (§7.4): validação → recibo (idempotência) → blobs → escopo
+  (`scope_missing`/`scope_deleted`) → regras de conteúdo do chat (§8.4: divergência, `stale_base`,
+  `not_host`, `chat_busy`) → revisão (`rev_mismatch`/`gone`) → cotas → escrita. As regras do chat vêm
+  antes das de revisão para que um replay com base velha marque a divergência em vez de devolver
+  `rev_mismatch`. A divergência é gravada numa transação própria (o lote em si é recusado).
+- **Reset de chaves**: apaga registros/blobs sem tombstones; `seq` continua monotônico e
+  `tombstone_floor = seq` (cursores antigos → `410 cursor_expired` → resync).
 
 ## 4. Backend — módulos
 
@@ -300,6 +325,9 @@ CREATE INDEX ON activity (at DESC);
 - **Host coordinator**: aplica a máquina de estados (§8 do protocolo); timers asyncio para
   `host_grace_deadline`/`handover_deadline`; no boot, marca todos os hosts como caídos com tolerância de
   `SERVER_RESTART_GRACE_S`.
+- **Eventos do admin**: o painel roda em outro processo; ban, apagar conta, revogar dispositivos e
+  mudar configurações fazem `NOTIFY clearchat_events` e a api (LISTEN) fecha os WebSockets (`4403`),
+  transmite `chat.state` e invalida o cache das configurações.
 - **Comandos remotos**: **não há fila guardada** (nem tabela). `remote.send` com o host online →
   repassa e guarda `cmd_id → remetente` só em memória até o `remote.result`; queda do host ou
   `COMMAND_RESULT_TIMEOUT_S` (30 s) → `remote.failed` ao remetente. Host fora → `host_offline` na hora.
@@ -310,7 +338,25 @@ CREATE INDEX ON activity (at DESC);
   + HTML simples ("Seu código ClearChat: 123456", validade, "se não foi você, ignore"; convite; "você já
   tem conta"). Falha de SMTP é logada (sem o código) e não muda a resposta HTTP.
 - **Logs**: JSON estruturado; nunca registrar tokens, códigos, `key_proof`, envelopes ou corpos de push;
-  e-mails só como HMAC.
+  e-mails só como HMAC. Exceção consciente: `MAIL_BACKEND=console` (desenvolvimento) escreve o e-mail
+  inteiro, com o código, no log.
+
+### 4.1 Lacunas do contrato — interpretação adotada (a levar ao SYNC_PROTOCOL.md nos dois repositórios)
+
+- `GET /records` → `{ records, next, has_more, head }` (como o feed); `GET /chat-states` →
+  `{ chat_states, state_cursor }`; `POST /chats/{id}/divergence/resolve` → `{ state }` (+ `results`,
+  `head`, `chat_heads` em `keep: 'local'` com itens); `PUT /keys/*` e `POST /keys/setup` → `KeysResponse`;
+  `POST /keys/reset` → `204`; `PUT /blobs` → `{ blob_id, created }`.
+- `stream.event` é aceito do host com `epoch` atual mesmo **sem** janela aberta (o snapshot pedido por
+  `stream.subscribe` chega antes do `host.begin` no diagrama §16.5; §11 fala em "janela aberta").
+- Push de conteúdo pelo host com a janela aberta e **sem** `host_epochs` é aceito (modo A); `host_epochs`
+  com host/epoch certos e janela fechada vira replay (modo B). Janela do host aberta mas WS do host
+  caído (tolerância) → `chat_busy`.
+- `host.release` sem troca pendente → o chat fica sem host (`epoch+1`).
+- Após `keys.reset` as conexões fecham com `4403` (como §10.5), mas os dispositivos **não** são revogados:
+  o cliente pode reconectar com o mesmo token e refazer o setup.
+- Fechamento por ociosidade (30 s sem frames) usa `1000`.
+- Refresh do site: corpo `{}` e o refresh vem do cookie `cc_refresh` (`Secure` só com `https`).
 
 ## 5. Rate limiting
 
@@ -332,14 +378,17 @@ Duas camadas:
 ## 6. Painel admin (só do dono, nunca exposto)
 
 - Serviço `admin` separado, publicado **só** em `127.0.0.1:${ADMIN_PORT}` (no compose:
-  `"127.0.0.1:${ADMIN_PORT}:8090"` — fixo, não configurável para outra interface). Acesso:
+  `"127.0.0.1:${ADMIN_PORT}:8090"` — fixo, não configurável para outra interface). Fora do Docker,
+  `python -m clearchat_admin` recusa escutar fora do loopback (dentro do container usa
+  `--host 0.0.0.0 --in-container`, e o isolamento fica com o mapeamento de porta do compose). Acesso:
   `ssh -L 8190:127.0.0.1:8190 ezenere@172.16.1.7` → `http://localhost:8190`.
 - **O Nginx nunca roteia para ele** (nenhum `location` aponta para a porta do admin; o exemplo de Nginx
   não o menciona). Vale também em self-host.
 - Autenticação: `ADMIN_TOKEN` do `.env` (≥ 32 caracteres aleatórios) num formulário de login → cookie de
   sessão assinado (`HttpOnly`, `SameSite=Strict`, expira em 12 h). Defesas extras: aceita só `Host`
   `localhost:<porta>`/`127.0.0.1:<porta>` (anti DNS rebinding), token CSRF em todo formulário, limite de
-  5 tentativas de login/min, comparação em tempo constante. Sem token configurado → o admin não sobe.
+  5 tentativas de login/min, comparação em tempo constante. Sem token configurado → o admin não sobe
+  (no container ele só registra o erro e fica parado, para não reiniciar em loop).
 - Funcionalidades:
   - **Usuários**: lista/busca (e-mail, nome, criado, último acesso, status, dispositivos, uso), detalhe.
   - **Armazenamento** por usuário e por tipo de registro (`SELECT type, count(*), sum(size) FROM records
@@ -383,7 +432,7 @@ em `https://clear.ezenere.com` (TLS no Nginx). **O usuário configura Nginx e DN
 ```bash
 cd /srv/websites/clear-chat
 cp .env.example .env && $EDITOR .env        # segredos, SMTP, Turnstile, PUBLIC_BASE_URL
-docker compose up -d --build                 # db → api (roda `alembic upgrade head` no start) → web → admin
+docker compose up -d --build                 # db → api (roda as migrações no start) → web → admin
 docker compose logs -f api
 ```
 
@@ -484,7 +533,25 @@ ssh -L 8190:127.0.0.1:8190 voce@servidor           # se for remoto; local: http:
   com `/api/info`).
 - O painel admin continua só em `127.0.0.1` — nunca exponha a porta dele.
 
-## 10. Checklist de segurança
+## 10. Desenvolvimento e testes
+
+```bash
+cd backend
+make venv                      # .venv com o backend + dev (Python ≥ 3.12; a imagem usa 3.13)
+make init-env                  # ../.env com segredos gerados (ajuste DATABASE_URL, PUBLIC_BASE_URL)
+make db-up                     # Postgres descartável no Docker em 127.0.0.1:55432 (ou qualquer Postgres ≥ 13)
+make migrate && make dev       # api em http://127.0.0.1:8100 (MAIL_BACKEND=console mostra os códigos no log)
+make admin                     # painel em http://127.0.0.1:8190
+make test                      # pytest — APAGA e recria o schema de TEST_DATABASE_URL
+make check                     # ruff + mypy + testes
+```
+
+Os testes sobem a api de verdade (uvicorn numa porta livre) contra um Postgres real, com timers do
+protocolo encurtados (tolerância 0,5 s, troca forçada 0,6 s, timeout de comando 0,6 s), e cobrem auth,
+sessões, chaves, push/pull, blobs, WebSocket, host/comandos/stream, divergência e o painel admin.
+Turnstile é testado com um transporte httpx falso (sem rede).
+
+## 11. Checklist de segurança
 
 - TLS obrigatório em produção (HSTS); `http://` só em LAN (o app avisa).
 - Segredos só no `.env` (permissão 600); `.env` no `.gitignore`.

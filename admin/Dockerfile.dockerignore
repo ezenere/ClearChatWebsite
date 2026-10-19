@@ -1,0 +1,8 @@
+# contexto = raiz do repositório: só backend/ e admin/ entram (BuildKit lê <Dockerfile>.dockerignore)
+*
+!backend/pyproject.toml
+!backend/alembic.ini
+!backend/clearchat_server
+!admin/clearchat_admin
+**/__pycache__
+**/*.pyc

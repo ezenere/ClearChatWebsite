@@ -1,0 +1,21 @@
+{% extends "base.html" %}{% block title %}Usuários{% endblock %}
+{% block content %}
+<h1>Usuários</h1>
+<div class="card">
+  <form class="inline" method="get" action="/users"><input name="q" value="{{ q }}" placeholder="e-mail ou nome"><button>Buscar</button><a href="/users/new">+ Criar usuário</a></form>
+  <table>
+    <tr><th>E-mail</th><th>Nome</th><th>Status</th><th>Criado</th><th>Último acesso</th><th class="num">Disp.</th><th class="num">Registros</th><th class="num">Dados</th><th class="num">Blobs</th></tr>
+    {% for u in users %}
+    <tr>
+      <td><a href="/users/{{ u.id }}">{{ u.email }}</a></td><td>{{ u.name }}</td>
+      <td><span class="badge {{ 'banned' if u.status == 'banned' else '' }}">{{ u.status }}</span>{% if not u.keys_ready %} <span class="badge">sem chaves</span>{% endif %}</td>
+      <td>{{ u.created_at|dt }}</td><td>{{ u.last_seen_at|dt }}</td>
+      <td class="num">{{ u.n_devices }}</td>
+      <td class="num">{{ u.usage_records }}{% if u.quota_records is not none %} / {{ u.quota_records }}{% endif %}</td>
+      <td class="num">{{ u.usage_record_bytes|human }}{% if u.quota_record_bytes is not none %} / {{ u.quota_record_bytes|human }}{% endif %}</td>
+      <td class="num">{{ u.usage_blob_bytes|human }}{% if u.quota_blob_bytes is not none %} / {{ u.quota_blob_bytes|human }}{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="9" class="muted">Nenhum usuário.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block title %}Painel{% endblock %}
+{% block content %}
+<h1>Painel</h1>
+<div class="grid" style="margin-bottom:16px">
+  <div class="stat"><b>{{ t.users }}</b><span>usuários ({{ t.banned }} banidos)</span></div>
+  <div class="stat"><b>{{ t.active7 }} / {{ t.active30 }}</b><span>ativos em 7 / 30 dias</span></div>
+  <div class="stat"><b>{{ t.devices }}</b><span>dispositivos ativos</span></div>
+  <div class="stat"><b>{{ t.records }}</b><span>registros ({{ t.record_bytes|human }})</span></div>
+  <div class="stat"><b>{{ t.blobs }}</b><span>blobs ({{ t.blob_bytes|human }})</span></div>
+</div>
+<div class="card">
+  <h2>Atividade por dia (14 dias)</h2>
+  <table><tr><th>Dia</th><th class="num">Logins</th><th class="num">Cadastros</th><th class="num">Falhas</th><th class="num">Pushes</th><th class="num">Uploads</th><th class="num">Usuários ativos</th></tr>
+  {% for d in days %}<tr><td>{{ d.day }}</td><td class="num">{{ d.logins }}</td><td class="num">{{ d.signups }}</td><td class="num">{{ d.failures }}</td><td class="num">{{ d.pushes }}</td><td class="num">{{ d.uploads }}</td><td class="num">{{ d.active }}</td></tr>{% endfor %}
+  </table>
+</div>
+<div class="card">
+  <h2>Eventos recentes</h2>
+  <table><tr><th>Quando</th><th>Evento</th><th>Usuário</th><th>IP</th></tr>
+  {% for a in recent %}<tr><td>{{ a.at|dt }}</td><td>{{ a.kind }}</td><td>{{ a.email or "—" }}</td><td>{{ a.ip or "—" }}</td></tr>{% else %}<tr><td colspan="4" class="muted">Nada ainda.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

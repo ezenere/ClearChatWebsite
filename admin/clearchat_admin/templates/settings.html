@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block title %}Instância{% endblock %}
+{% block content %}
+<h1>Configurações da instância</h1>
+<div class="card" style="max-width:640px">
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Nome da instância <input name="instance_name" value="{{ cur.instance_name }}" maxlength="80"></label>
+    <label><input type="checkbox" name="signup_open" value="1" {{ "checked" if cur.signup_open }}> Cadastro aberto (fechado: só convites ou usuários criados aqui)</label>
+    <label><input type="checkbox" name="landing_enabled" value="1" {{ "checked" if cur.landing_enabled }}> Página inicial (landing) no site</label>
+    <label><input type="checkbox" name="captcha_enabled" value="1" {{ "checked" if cur.captcha_enabled }}> Captcha (Cloudflare Turnstile)</label>
+    <p class="muted">{% if keys %}Chaves Turnstile presentes no <code>.env</code>.{% else %}<span class="danger">Sem TURNSTILE_SITE_KEY/TURNSTILE_SECRET_KEY no <code>.env</code>: o captcha fica desligado de qualquer forma</span> (os limites de taxa continuam).{% endif %}</p>
+    <label><input type="checkbox" disabled> Gateway de execução (reservado, desabilitado na v1)</label>
+    <button>Salvar</button>
+  </form>
+</div>
+<div class="card" style="max-width:640px">
+  <h2>Endereço público</h2>
+  <p><code>{{ settings.public_base_url }}</code> <span class="muted">(PUBLIC_BASE_URL no .env)</span></p>
+</div>
+{% endblock %}

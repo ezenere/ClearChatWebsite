@@ -1,19 +1,22 @@
-# ClearChat — servidor de sync + site. ESQUELETO: os Dockerfiles de backend/, frontend/ e admin/ ainda
-# serão criados na implementação. Ver docs/ARCHITECTURE.md §8–9.
+# ClearChat — servidor de sync + site. Ver docs/ARCHITECTURE.md §8–9.
+#   produção (Nginx do host na frente):  docker compose up -d --build
+#   self-host sem Nginx (Caddy, 1 porta): docker compose --profile edge up -d --build
 name: clearchat
+
+x-db-url: &db-url postgresql+asyncpg://${POSTGRES_USER:-clearchat}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-clearchat}
 
 services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-clearchat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-clearchat}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -24,8 +27,10 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: .env
-    # 1 worker (hub WS + timers de host em memória); alembic upgrade head no entrypoint
-    command: ["sh", "-c", "alembic upgrade head && uvicorn clearchat_server.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+    environment:
+      DATABASE_URL: *db-url          # sobrepõe o do .env (o compose interpola aqui)
+      BLOB_STORAGE_DIR: /data/blobs
+    # o CMD da imagem roda `migrate` e depois a api com 1 worker (hub WS + timers de host em memória)
     depends_on:
       db: { condition: service_healthy }
     volumes:
@@ -33,9 +38,10 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8100}:8000"
     networks: [internal]
+    stop_grace_period: 20s           # fecha os WebSockets com 1001 antes de sair
 
   web:
-    build: ./frontend
+    build: ./frontend                # frontend/Dockerfile: build estático → nginx (porta 80), gera config.js no start
     restart: unless-stopped
     environment:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}   # vira config.js no start (base path em tempo de execução)
@@ -46,13 +52,17 @@ services:
   admin:
     build:
       context: .
-      dockerfile: admin/Dockerfile          # copia backend/ (modelos) + admin/
+      dockerfile: admin/Dockerfile   # copia backend/ (modelos e serviços) + admin/
     restart: unless-stopped
     env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+      BLOB_STORAGE_DIR: /data/blobs
     depends_on:
       db: { condition: service_healthy }
+      api: { condition: service_started }   # a api aplica as migrações
     volumes:
-      - blobs:/data/blobs                   # apagar conta remove os arquivos
+      - blobs:/data/blobs            # apagar conta remove os arquivos
     ports:
       - "127.0.0.1:${ADMIN_PORT:-8190}:8090"   # SEMPRE 127.0.0.1 — nunca exponha, nunca roteie no Nginx
     networks: [internal]

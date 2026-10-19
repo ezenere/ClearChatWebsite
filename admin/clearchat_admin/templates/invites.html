@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% block title %}Convites{% endblock %}
+{% block content %}
+<h1>Convites</h1>
+{% if link %}<div class="card"><h2>Link de convite (mostrado só agora)</h2><p><code id="invite-link">{{ link }}</code></p></div>{% endif %}
+<div class="card">
+  <h2>Novo convite</h2>
+  <form method="post" action="/invites" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="email" name="email" placeholder="e-mail (opcional: amarra o convite)">
+    <input name="note" placeholder="nota (opcional)">
+    <input type="number" name="days" min="1" max="365" placeholder="validade em dias ({{ settings.invite_ttl_days }})">
+    <label><input type="checkbox" name="send_email" value="1"> enviar por e-mail</label>
+    <button>Gerar link</button>
+  </form>
+</div>
+<div class="card">
+  <table><tr><th>Criado</th><th>E-mail</th><th>Nota</th><th>Expira</th><th>Estado</th><th></th></tr>
+  {% for i in invites %}
+  <tr><td>{{ i.created_at|dt }}</td><td>{{ i.email or "qualquer" }}</td><td>{{ i.note or "" }}</td><td>{{ i.expires_at|dt }}</td>
+    <td>{% if i.used_at %}usado por {{ i.used_email or "conta apagada" }}{% elif i.revoked_at %}revogado{% elif i.expires_at < now %}expirado{% else %}<span class="ok">válido</span>{% endif %}</td>
+    <td>{% if not i.used_at and not i.revoked_at %}<form method="post" action="/invites/{{ i.id }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Revogar</button></form>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">Nenhum convite.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}
