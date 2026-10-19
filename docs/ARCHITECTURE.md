@@ -39,7 +39,7 @@
 
 Decisões:
 - **Um worker** do uvicorn: o hub de WebSocket e os timers de host (tolerância de 10 s, troca forçada,
-  expiração de comandos) ficam em memória do processo, com o estado durável no Postgres. Escala de uma
+  comandos remotos em trânsito aguardando resultado) ficam em memória do processo, com o estado durável no Postgres. Escala de uma
   instância pessoal/pequena cabe com folga. Caminho futuro para vários workers: `LISTEN/NOTIFY` do
   Postgres para fan-out entre processos + timers baseados em colunas `*_deadline` varridas por job (o
   esquema abaixo já guarda os deadlines).
@@ -237,22 +237,6 @@ CREATE TABLE chat_states (
 CREATE INDEX ON chat_states (user_id, ssq);
 CREATE INDEX ON chat_states (user_id, host_device_id);
 
-CREATE TABLE chat_commands (            -- comandos remotos em trânsito / guardados (SYNC §8.6–8.7)
-  user_id        uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  chat_id        text NOT NULL,
-  cmd_id         text NOT NULL,
-  kind           text NOT NULL,
-  from_device_id uuid,
-  env            jsonb NOT NULL,
-  stored         boolean NOT NULL,         -- true = guardado (send com host fora); false = em trânsito
-  created_at     timestamptz NOT NULL DEFAULT now(),
-  expires_at     timestamptz,              -- só guardados
-  delivered_at   timestamptz,              -- entregue ao host, aguardando remote.result
-  pos            bigserial,
-  PRIMARY KEY (user_id, chat_id, cmd_id)
-);
-CREATE INDEX ON chat_commands (expires_at) WHERE stored;
-
 CREATE TABLE divergence_discards (
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   chat_id text NOT NULL, device_id uuid NOT NULL, base bigint NOT NULL, divergence_id uuid NOT NULL,
@@ -294,7 +278,7 @@ CREATE INDEX ON activity (at DESC);
 - **Host** (`host.begin/end/takeover/release`, divergência): transação com `chat_states FOR UPDATE`;
   toda mudança incrementa `users.state_seq` e grava `ssq`; após commit, broadcast `chat.state`.
 - **Cascata de chat**: no mesmo push do tombstone — `DELETE FROM records WHERE user_id=$1 AND scope_id=$2
-  AND type IN ('session','message')`, `DELETE FROM chat_states/chat_commands`, ajuste de uso. Coleção de
+  AND type IN ('session','message')`, `DELETE FROM chat_states`, ajuste de uso. Coleção de
   memória: `DELETE … type='memory' AND scope_id=$2`.
 - **Uso**: `usage_*` ajustados na mesma transação (delta de `size`).
 
@@ -316,10 +300,12 @@ CREATE INDEX ON activity (at DESC);
 - **Host coordinator**: aplica a máquina de estados (§8 do protocolo); timers asyncio para
   `host_grace_deadline`/`handover_deadline`; no boot, marca todos os hosts como caídos com tolerância de
   `SERVER_RESTART_GRACE_S`.
+- **Comandos remotos**: **não há fila guardada** (nem tabela). `remote.send` com o host online →
+  repassa e guarda `cmd_id → remetente` só em memória até o `remote.result`; queda do host ou
+  `COMMAND_RESULT_TIMEOUT_S` (30 s) → `remote.failed` ao remetente. Host fora → `host_offline` na hora.
 - **Jobs** (asyncio, a cada 5 min, com `pg_try_advisory_lock` para nunca rodar em dobro):
   tombstones > 180 d (atualiza `tombstone_floor`), blobs sem referência > 24 h (apaga arquivo e linha),
-  `push_receipts` > 7 d, `email_codes` expirados > 1 d, `chat_commands` guardados expirados (broadcast
-  `command_expired`), `rate_counters` velhos, `activity` > 90 d, `access_tokens` expirados.
+  `push_receipts` > 7 d, `email_codes` expirados > 1 d, `rate_counters` velhos, `activity` > 90 d, `access_tokens` expirados.
 - **E-mail**: aiosmtplib com `SMTP_TLS_MODE` = `starttls` | `ssl` | `none`; templates pt-BR em texto puro
   + HTML simples ("Seu código ClearChat: 123456", validade, "se não foi você, ignore"; convite; "você já
   tem conta"). Falha de SMTP é logada (sem o código) e não muda a resposta HTTP.
@@ -401,10 +387,14 @@ docker compose up -d --build                 # db → api (roda `alembic upgrade
 docker compose logs -f api
 ```
 
-Portas no host (todas em `127.0.0.1` por padrão; `BIND_ADDR` muda api/web se o Nginx estiver em outra
-máquina — o admin fica sempre em 127.0.0.1): `API_PORT=8100`, `WEB_PORT=8101`, `ADMIN_PORT=8190`.
-Postgres sem porta publicada. Rede do compose com sub-rede fixa (`COMPOSE_SUBNET`, padrão
-`172.31.250.0/24`) para que `TRUSTED_PROXY_CIDRS` cubra o gateway da bridge por onde o Nginx do host chega.
+**O Nginx roda na mesma máquina que o Docker (172.16.1.7)** — confirmado. Por isso todas as portas são
+publicadas só em `127.0.0.1` (`BIND_ADDR=127.0.0.1`, padrão): `API_PORT=8100`, `WEB_PORT=8101`,
+`ADMIN_PORT=8190` (o admin é fixo em 127.0.0.1 no compose, qualquer que seja o `BIND_ADDR`). Postgres sem
+porta publicada. Uma conexão do Nginx para `127.0.0.1:8100` chega no container vinda do gateway da bridge
+do compose (o docker-proxy reescreve a origem), por isso a rede tem sub-rede fixa (`COMPOSE_SUBNET`,
+padrão `172.31.250.0/24`) e `TRUSTED_PROXY_CIDRS=127.0.0.1/32,172.31.250.1/32` (padrão) — a api só
+aceita `X-Real-IP` vindo daí. (Em self-host com o proxy em outra máquina: `BIND_ADDR` = interface da LAN e
+o IP do proxy em `TRUSTED_PROXY_CIDRS`.)
 
 ### 8.1 Nginx (exemplo — `deploy/nginx.example.conf`)
 

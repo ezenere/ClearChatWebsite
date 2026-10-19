@@ -60,8 +60,8 @@ app (`createdAt` etc. dentro dos registros cifrados) em ms Unix, como no app hoj
   respondem aprovações/questionários, param/forçam — tudo retransmitido (cifrado) ao host — e todos
   assistem ao vivo.
 - **Divergência**: se duas histórias do mesmo chat forem produzidas sem uma ver a outra (ex.: execução
-  offline), o chat fica *divergente* e o usuário escolhe qual versão vira a online; a outra é preservada
-  localmente como cópia.
+  offline), o chat fica *divergente* e o usuário escolhe qual versão vira a online; a outra é **descartada**
+  (com aviso claro antes).
 
 ### Glossário
 
@@ -93,7 +93,7 @@ app (`createdAt` etc. dentro dos registros cifrados) em ms Unix, como no app hoj
 | `type`, `id`, `scope`, `rev`, `seq`, `deleted`, tamanho do ciphertext, timestamps do servidor, dispositivo que escreveu | sync, cascatas, cotas |
 | ids dos blobs referenciados por cada registro (`blobs`) e tamanho dos blobs | GC de blobs e cotas |
 | estado de host por chat (dispositivo host, epoch, rodando/ocioso, fixado, troca pendente, divergente) | coordenação de execução |
-| tipo de cada comando remoto (`send`, `stop`…) e quem enviou | decidir o que pode ser guardado offline |
+| tipo de cada comando remoto (`send`, `stop`…) e quem enviou | roteamento ao host e logs de uso |
 | parâmetros do KDF, salts, DEK embrulhada, `verifier` (SHA-256 de uma subchave) | desbloqueio; prova de posse |
 
 Tudo o mais — conteúdo de mensagens, títulos, configs, chaves de API, nomes de skills, nomes de arquivos,
@@ -772,7 +772,7 @@ DEVE puxar e tratar como divergência.
 
 - Apagar = push com `deleted: true`. O tombstone fica no feed (§7.8).
 - **Chat**: exige que o chat não esteja com janela de escrita aberta (`409 chat_busy`). O servidor apaga
-  (fisicamente) todos os registros com `scope = chat_id`, os comandos guardados e o estado do chat; só o
+  (fisicamente) todos os registros com `scope = chat_id` e o estado do chat; só o
   tombstone do `chat` vai ao feed. Clientes apagam localmente o chat com sessões e mensagens (cascata como
   no app). Push de conteúdo para chat apagado → `scope_deleted`: o cliente pergunta "Este chat foi apagado
   em outro dispositivo e você tem mensagens não sincronizadas: **Manter como novo chat** / **Descartar**"
@@ -812,7 +812,8 @@ Por usuário, no servidor (nulo = ilimitado, que é o padrão hoje): `quota_reco
   (`device_id` + nome), visível em toda UI: selo **"Executando em <dispositivo>"**.
 - Os outros dispositivos são **controles remotos**: enviam mensagens e comandos (cifrados) que o servidor
   retransmite ao host, que os coloca na fila normal do runner (mesma semântica da fila local, ⚡,
-  aprovações, questionários, parar). Todos assistem ao vivo (§11).
+  aprovações, questionários, parar). Todos assistem ao vivo (§11). Comandos remotos **só funcionam com o
+  host online**: não existe fila guardada no servidor (§8.7).
 - **Host padrão** = o dispositivo que rodou o chat por último. Ele continua host enquanto não houver
   troca explícita. Se estiver offline, ninguém assume automaticamente: assumir exige ação do usuário em
   outro dispositivo. Exceção: **chat sem host** — o primeiro dispositivo (com `can_host`) que enviar vira host.
@@ -833,7 +834,6 @@ Por usuário, no servidor (nulo = ilimitado, que é o padrão hoje): `quota_reco
 | `head` | `seq` da última mudança de conteúdo aceita |
 | `handover` | troca pendente: `{ to_device_id, mode: 'next_turn'\|'force', requested_at }` ou null |
 | `diverged` | `{ divergence_id, device_id, base, head, since }` ou null (§9) |
-| `pending` | comandos guardados aguardando o host (§8.7) |
 | `ssq` | versão do estado (contador por usuário, para sync incremental dos estados) |
 
 Status do host derivado da conexão: `none` (sem host) · `online` (conectado) · `grace` (caiu há < 10 s)
@@ -847,11 +847,10 @@ ChatState = {
   window: { purpose: 'run'|'edit'|'replay', since: string } | null,      // "rodando" = window != null
   handover: { to_device_id: string, to_name: string, mode: 'next_turn'|'force', requested_at: string } | null,
   diverged: { divergence_id: string, device_id: string, device_name: string, base: number, head: number, since: string } | null,
-  pending: [{ cmd_id: string, kind: 'send', from_device_id: string, created_at: string, expires_at: string, env: Envelope }],
   event?: ChatStateEvent      // só no broadcast: o que acabou de acontecer
 }
 ChatStateEvent = { kind: 'host_dropped' | 'host_back' | 'host_changed' | 'handover_requested' | 'handover_cancelled'
-                         | 'turn_started' | 'turn_ended' | 'diverged' | 'resolved' | 'command_expired' | 'pinned' | 'unpinned',
+                         | 'turn_started' | 'turn_ended' | 'diverged' | 'resolved' | 'pinned' | 'unpinned',
                    device_id?: string, cmd_id?: string, reason?: string }
 ```
 O cliente DEVE mostrar `host_dropped` como **"O dispositivo remoto (<nome>) caiu"**.
@@ -873,7 +872,7 @@ stateDiagram-v2
     Rodando --> TrocaPendente: host.takeover (next_turn espera o turno; force para o turno)
     TrocaPendente --> HostOnline: host.release do host antigo / timeout do force / queda do host antigo → novo host (epoch+1)
     TrocaPendente --> Rodando: host.handover_cancel (volta ao estado anterior)
-    HostOffline --> HostOnline: host.takeover (imediato, epoch+1, novo host recebe os comandos guardados)
+    HostOffline --> HostOnline: host.takeover (imediato, epoch+1)
     SemHost --> Divergente: push com base < head
     HostOnline --> Divergente: push de replay com base < head
     HostOffline --> Divergente: push de replay com base < head
@@ -897,8 +896,7 @@ Transições (normativas):
    fechada, `host.status = offline`, broadcast `event: host_dropped`. O host **não** muda.
 4. **Reinício do servidor**: todas as conexões caem; a tolerância conta a partir do boot e vale
    `SERVER_RESTART_GRACE_S` (60 s).
-5. **Revogação do dispositivo host** → `host = null` em todos os chats dele (comandos guardados ficam
-   para o próximo host).
+5. **Revogação do dispositivo host** → `host = null` em todos os chats dele.
 
 ### 8.4 Regras de escrita do conteúdo do chat (push)
 
@@ -942,51 +940,50 @@ envia; se alguém assumiu e rodou nesse meio-tempo, diverge.
 Controle remoto → `remote.send` → servidor → host (`remote.command`) → host executa → `remote.result`
 → servidor → quem enviou. Payload cifrado com `K_stream` e AAD de comando (§3.10); `kind` em claro.
 
-| `kind` | Plaintext (`sv: 1` + …) | Equivalente no app | Guardável offline |
-|---|---|---|---|
-| `send` | `{ sessionId, text, attachments: AttachmentInfo[], skills: string[], createdAt }` | `agent.send` (rodando → fila; ocioso → turno) | **sim** |
-| `force` | `{ sessionId, text, attachments, skills, createdAt }` | enviar já com ⚡ (`send` + `forceSend`) | não |
-| `queue.force` | `{ sessionId, queuedId }` | `agent.forceSend` | não |
-| `queue.remove` | `{ sessionId, queuedId }` | `agent.removeQueued` | não |
-| `stop` | `{ sessionId }` | `agent.stop` | não |
-| `stop_subagents` | `{}` | `agent.stopSubagents(chatId)` | não |
-| `approval` | `{ requestId, decision: 'allow'\|'deny', items?: ApprovalItemDecision[] }` | `agent.approve` | não |
-| `smart_override` | `{ messageId }` | `agent.smartOverride` | não |
-| `question` | `{ requestId, answers?: QuestionAnswer[], cancel?: true }` | `questions.answer` / `cancel` | não |
-| `retry` | `{ requestId, action: 'retry'\|'cancel' }` | `retries.retry` / `cancel` | não |
-| `regenerate` | `{ sessionId }` | `agent.regenerate` | não |
-| `message.edit` | `{ messageId, message: ApiMessage }` | `messages.update` | não |
-| `message.delete` | `{ messageId }` | `messages.delete` | não |
-| `compact` | `{ sessionId, opts?: CompactOptions }` | `agent.compact` | não |
-| `memory.extract` | `{ sessionId }` | `memory.extractNow` | não |
+| `kind` | Plaintext (`sv: 1` + …) | Equivalente no app |
+|---|---|---|
+| `send` | `{ sessionId, text, attachments: AttachmentInfo[], skills: string[], createdAt }` | `agent.send` (rodando → fila; ocioso → turno) |
+| `force` | `{ sessionId, text, attachments, skills, createdAt }` | enviar já com ⚡ (`send` + `forceSend`) |
+| `queue.force` | `{ sessionId, queuedId }` | `agent.forceSend` |
+| `queue.remove` | `{ sessionId, queuedId }` | `agent.removeQueued` |
+| `stop` | `{ sessionId }` | `agent.stop` |
+| `stop_subagents` | `{}` | `agent.stopSubagents(chatId)` |
+| `approval` | `{ requestId, decision: 'allow'\|'deny', items?: ApprovalItemDecision[] }` | `agent.approve` |
+| `smart_override` | `{ messageId }` | `agent.smartOverride` |
+| `question` | `{ requestId, answers?: QuestionAnswer[], cancel?: true }` | `questions.answer` / `cancel` |
+| `retry` | `{ requestId, action: 'retry'\|'cancel' }` | `retries.retry` / `cancel` |
+| `regenerate` | `{ sessionId }` | `agent.regenerate` |
+| `message.edit` | `{ messageId, message: ApiMessage }` | `messages.update` |
+| `message.delete` | `{ messageId }` | `messages.delete` |
+| `compact` | `{ sessionId, opts?: CompactOptions }` | `agent.compact` |
+| `memory.extract` | `{ sessionId }` | `memory.extractNow` |
 
 Regras:
 - `skills`: nomes; o **host** resolve e lê o `SKILL.md` (as skills que valem são as do host — o host
   publica a lista no snapshot do stream, §11, para a lâmpada do controle remoto).
 - `attachments`: o controle remoto sobe os blobs **antes** de enviar; o host baixa pelo sha256 (§14)
   antes de aceitar. Falta blob → `rejected` com `error: 'attachment_missing'`.
-- O host DEVE deduplicar por `cmd_id` (guardar os processados por 7 dias) — a entrega é *at-least-once*.
+- **Só com o host online** (`host.status = online`): com host `grace`/`offline` → erro `host_offline` na
+  hora; sem host → `no_host` (quem pode hospedar roda localmente, §8.7). Nada é guardado no servidor.
+- Entrega **no máximo uma vez**: o servidor mantém o comando só em memória, enquanto espera o resultado.
+  Se o host cair antes do `remote.result`, ou não responder em `COMMAND_RESULT_TIMEOUT_S` (30 s), quem
+  enviou recebe `remote.failed {code: 'host_offline' | 'command_timeout'}` e mostra um erro claro
+  ("O host (<nome>) caiu antes de confirmar — a mensagem pode não ter sido entregue"), mantendo o texto
+  no composer. O host DEVERIA deduplicar por `cmd_id` (reenvio manual reaproveita o id).
 - Resultado (`remote.result`, cifrado com AAD de resultado): `{ sv: 1, status: 'accepted'|'rejected'|'duplicate', queued?: boolean, error?: string }`.
-  O servidor guarda o comando até receber o resultado; se o host cair antes, reentrega na reconexão
-  (`send` guardado) ou descarta e avisa o remetente (`host_offline`) para os não guardáveis.
-- Comando não guardável com host `grace`/`offline`/sem host → erro `host_offline` / `no_host` na hora.
 - Com o chat divergente → `chat_diverged`.
-- O controle remoto mantém a mensagem enviada como "pendente" localmente até `accepted` (ou mostra
-  "não entregue" com "Tentar de novo / Rodar aqui").
+- O controle remoto mostra a mensagem como "enviando…" até `accepted`.
 
-### 8.7 Host offline: "rodar aqui" ou "aguardar"
+### 8.7 Host offline: só "Executar neste dispositivo"
 
-Quando o usuário tenta enviar num controle remoto e o host está `offline` (ou `grace`), o cliente
-mostra: **"O dispositivo de origem (<nome>) está offline — Rodar aqui · Aguardar"**.
-- **Rodar aqui** → `host.takeover` (imediato, §8.8) e roda localmente. Com aviso de ferramentas locais
-  (§8.9) e, se `pinned`, confirmação extra.
-- **Aguardar** → `remote.send {store_if_offline: true}` (só `send`): o servidor guarda o comando
-  cifrado em `pending` com `expires_at = agora + COMMAND_TTL` (72 h) e responde `stored`. Entrega:
-  quando o host reconectar (em ordem FIFO, antes de novos comandos) ou ao **novo host** se alguém
-  assumir. O remetente pode cancelar (`remote.cancel`). Expirou → removido, broadcast
-  `event: command_expired` (o remetente mostra "não entregue" e mantém o texto).
+Com o host `offline` (ou em `grace`), controles remotos **não podem enviar mensagens nem qualquer
+comando**. O composer fica desabilitado com a faixa **"O host (<nome>) está offline"** e uma única ação:
+**"Executar neste dispositivo"** → `host.takeover` (imediato, §8.8), com o aviso de ferramentas locais
+(§8.9) e, se o host estiver fixado, a confirmação extra. Não existe "aguardar", fila guardada no servidor,
+expiração nem entrega na reconexão.
 - Chat sem host: o primeiro `send` vira execução local (o dispositivo vira host) — sem pergunta. Site
-  (`can_host=false`) sem host online: `no_host` ("abra este chat num dispositivo que possa executá-lo").
+  (`can_host=false`) sem host online: composer desabilitado com "O host está offline — abra este chat num
+  dispositivo que possa executá-lo".
 
 ### 8.8 Trocar de host ("Executar neste dispositivo")
 
@@ -994,7 +991,7 @@ mostra: **"O dispositivo de origem (<nome>) está offline — Rodar aqui · Agua
 
 - N sem `can_host` → `cannot_host`; divergente → `chat_diverged`; `pinned && !confirm_pinned` → `host_pinned`.
 - **Host offline / sem host** → concedido na hora: `host = N`, `epoch+1`, janela fechada; N recebe
-  `host.granted {epoch, head}` e, em seguida, os comandos `pending` (`remote.command`).
+  `host.granted {epoch, head}`.
 - **Host em `grace`** → troca pendente; se o host voltar, recebe o pedido; se expirar, concede a N.
 - **Host online** → `handover` pendente; o host recebe `host.handover_request {to_device_id, mode}`:
   - `next_turn` (padrão): o host termina o turno atual **sem** puxar mais nada da fila — repassa os itens
@@ -1007,12 +1004,14 @@ mostra: **"O dispositivo de origem (<nome>) está offline — Rodar aqui · Agua
     `not_host` → replay → divergência, se houver).
   - Host antigo cai durante a troca pendente → ao fim da tolerância, concede a N.
 - `host.release { chat_id, epoch, forwarded: [{ cmd_id, env }] }`: o host antigo repassa a fila local
-  como comandos `send` (cifrados por ele, `cmd_id` novos) — o servidor os põe em `pending` do novo host.
+  como comandos `send` (cifrados por ele, `cmd_id` novos) — o servidor os retransmite ao novo host logo
+  após o `host.granted` (em trânsito, como qualquer comando: se N não estiver conectado, o antigo host
+  recebe `remote.failed` e mostra os textos como não entregues).
   O servidor concede a N (`host.granted`), avisa o antigo (`host.revoked {reason: 'handover'}`) e
   transmite `event: host_changed`.
 - `host.handover_cancel { chat_id }` (por N ou pelo host) desfaz a troca pendente.
 - Ao virar host, N DEVE: puxar até `head`; resolver a raiz local do chat (se não tiver `cwd` local para
-  esse chat → pedir a pasta, padrão `defaultCwd`); atualizar `chat.hostCwd`; então processar os comandos.
+  esse chat → pedir a pasta, padrão `defaultCwd`); atualizar `chat.hostCwd`; então processar os itens repassados.
 
 ### 8.9 Avisos de ferramentas locais e "fixar host"
 
@@ -1046,12 +1045,14 @@ transmite `event: diverged`.
 ### 9.2 Enquanto divergente
 
 - **Nada é salvo online para esse chat**: o servidor recusa push de `session`/`message` **e** do
-  registro `chat` (exceto a exclusão do chat), `host.begin` e comandos (`chat_diverged`). Comandos já
-  guardados ficam retidos.
+  registro `chat` (exceto a exclusão do chat), `host.begin` e comandos (`chat_diverged`).
 - Todos os dispositivos mostram o selo **"divergente"**. No dispositivo D (o que tem a versão local),
   o chat abre com o seletor "**Versão online** · **Versão deste dispositivo**" (as duas navegáveis) e a
   escolha "Manter esta como a versão online". Nos outros: "Divergente — resolva em <D>" + "Descartar a
   versão de <D>" (= manter a online).
+- **Aviso obrigatório antes de descartar** (diálogo de confirmação em qualquer dispositivo):
+  *"A outra versão será apagada. Mensagens que só existem nela (N mensagens desde <data>) serão perdidas
+  e não poderão ser recuperadas."* — botões "Apagar a outra versão e manter esta" / "Cancelar".
 - Em D, enquanto o chat tiver conteúdo local pendente, mudanças remotas de conteúdo desse chat **não**
   são aplicadas nas tabelas locais (só avançam o cursor e marcam o chat "precisa rebaixar"); a versão
   online é baixada inteira na resolução (`GET /records?scope=X`).
@@ -1063,17 +1064,16 @@ transmite `event: diverged`.
 { divergence_id: string, keep: 'online' | 'local', push_id?: string, items?: PushItem[] }
 ```
 - **`keep: 'online'`** (qualquer dispositivo): sem itens. O servidor limpa `diverged` e grava em
-  `divergence_discards (chat_id, device_id = D, base)`. D (agora ou quando reconectar — o próximo push
-  dele com a mesma `base` recebe `divergence_discarded`) **preserva a sua versão como cópia local**:
-  novo chat com ids novos (chat, sessões, mensagens; anexos iguais — content-addressed), título
-  `"<título> (versão de <D>, <dd/mm hh:mm>)"`, marcado **"cópia local · não sincronizada"** (tabela local
-  `sync_local_only_chats`), com ação "Enviar para a nuvem" (vira chat normal). Depois apaga o conteúdo
-  local de X e baixa a versão online.
-- **`keep: 'local'`** (só D): D baixa a versão online inteira (`GET /records?scope=X`), guarda-a como
-  cópia local (mesma regra acima), e envia em `items` o lote que transforma o online no local: puts das
-  suas sessões/mensagens (`base_rev` = rev online, ou 0 se novo) e tombstones das que só existem online,
-  + o registro `chat` se mudou. O servidor confere `divergence_id` e `device_id == D`, aplica atômico
-  (regras de rev normais, sem a checagem de `head`), limpa `diverged`, atualiza `head` e transmite.
+  `divergence_discards (chat_id, device_id = D, base)`. D (agora, ou quando reconectar — o próximo push
+  dele com a mesma `base` recebe `divergence_discarded`) **apaga a sua versão local** (sessões e mensagens
+  que não estão online, outbox desse chat) e baixa a versão online (`GET /records?scope=X`).
+- **`keep: 'local'`** (só D): D baixa a lista online (`GET /records?scope=X`) e envia em `items` o lote que
+  transforma o online no local: puts das suas sessões/mensagens (`base_rev` = rev online, ou 0 se novo) e
+  tombstones das que só existem online, + o registro `chat` se mudou. O servidor confere `divergence_id`
+  e `device_id == D`, aplica atômico (regras de rev normais, sem a checagem de `head`), limpa `diverged`,
+  atualiza `head` e transmite. A versão online anterior é **descartada** (os outros dispositivos aplicam
+  os tombstones normalmente).
+- Nenhuma cópia da versão perdedora é mantida, em nenhum dispositivo.
 - `divergence_id` velho → `409 divergence_mismatch`. O host não muda na resolução (se não houver host,
   D vira host em `keep: 'local'`).
 - Só uma divergência ativa por chat. Um terceiro dispositivo com versão própria recebe `chat_diverged`
@@ -1099,7 +1099,8 @@ transmite `event: diverged`.
 - **Registros**: estado pelo cursor — eventos `sync.changes` perdidos são recuperados por pull.
 - **Estados de chat**: `chat.state` traz o estado completo e `ssq`; na reconexão, `hello.state_cursor`
   faz o `welcome` trazer todos os estados com `ssq` maior.
-- **Comandos**: guardados no servidor até o `remote.result` (§8.6).
+- **Comandos**: só com o host online; perda de conexão do host antes do resultado → `remote.failed` para
+  quem enviou (§8.6). Nunca reentregues.
 - **Stream**: `n` contíguo por janela + snapshot sob pedido (§11).
 - **Heartbeat**: o cliente manda `ping` a cada 15 s; o servidor responde `pong`. Sem `pong` em 10 s → o
   cliente reconecta. O servidor considera a conexão morta após 30 s sem nenhum frame.
@@ -1123,7 +1124,6 @@ Servidor → `welcome` (como `ack` do hello):
 ```
 Depois do `welcome`, o servidor já transmite eventos ao vivo; o cliente puxa de `cursor` até `head`
 (guardando os `sync.changes` que chegarem nesse meio-tempo e aplicando depois os de `seq > cursor`).
-Comandos guardados para este dispositivo (host) chegam logo após o `welcome`.
 
 ### 10.4 Catálogo — cliente → servidor (requisições com `id`)
 
@@ -1140,8 +1140,7 @@ Comandos guardados para este dispositivo (host) chegam logo após o `welcome`.
 | `host.handover_cancel` | `chat_id` | `{}` |
 | `host.release` | `chat_id, epoch, forwarded: [{cmd_id, env}]` | `{}` |
 | `host.pin` | `chat_id, pinned` | `{ ssq }` |
-| `remote.send` | `chat_id, cmd_id, kind, env, store_if_offline?` | `{ status: 'delivered'\|'stored' }` |
-| `remote.cancel` | `chat_id, cmd_id` | `{ cancelled: boolean }` (falso se já entregue) |
+| `remote.send` | `chat_id, cmd_id, kind, env` | `{ status: 'delivered' }` (ou erro `host_offline`/`no_host`/`chat_diverged`) |
 | `remote.result` | `chat_id, cmd_id, env` (host) | `{}` |
 | `stream.subscribe` | `chat_ids: string[]` | `{}` (o servidor pede snapshot aos hosts) |
 | `stream.unsubscribe` | `chat_ids: string[]` | `{}` |
@@ -1162,6 +1161,7 @@ Comandos guardados para este dispositivo (host) chegam logo após o `welcome`.
 | `host.handover_request` | `chat_id, epoch, to_device_id, to_name, mode` | host atual |
 | `remote.command` | `chat_id, cmd_id, kind, env, from_device_id, created_at` | host |
 | `remote.result` | `chat_id, cmd_id, env` | quem enviou o comando |
+| `remote.failed` | `chat_id, cmd_id, code: 'host_offline'\|'command_timeout'` | quem enviou o comando |
 | `stream.event` | `chat_id, epoch, n, env, device_id` | conexões inscritas no chat |
 | `stream.resync_request` | `chat_id, requester_device_id` | host |
 | `keys.changed` | `keys_rev` | todas |
@@ -1216,8 +1216,9 @@ chaves resetadas), `4409 superseded`, `4429 rate_limited`, `1001` reinício do s
 
 1. Após desbloquear: `GET /account` (`usage.records`). **Online vazio** → envia tudo (abaixo), sem
    perguntar. **Local vazio** → só baixa.
-2. Os dois têm dados → pergunta: **"Priorizar online"** · **"Priorizar local"** (explicação: nada é
-   apagado; a prioridade decide quem vence quando a mesma coisa existe dos dois lados).
+2. Os dois têm dados → pergunta: **"Priorizar online"** · **"Priorizar local"** (explicação: os dois lados
+   são unidos; a prioridade decide quem vence quando a mesma coisa existe dos dois lados — e a versão
+   perdedora dessas coisas é descartada).
 3. Baixa todo o estado online (registros; sem blobs; skills não), decifra.
 4. **Deduplicação** (local → online; o **id canônico é sempre o online**, assim os outros dispositivos
    não precisam remapear nada; a prioridade decide o **conteúdo**):
@@ -1240,7 +1241,8 @@ chaves resetadas), `4409 superseded`, `4429 rate_limited`, `1001` reinício do s
    `Memory.supersedesId`. Metadados informativos em `MessageMeta` não são remapeados.
 6. **Conteúdo vencedor**: priorizar online → o conteúdo online fica e o local é descartado para essas
    entidades; priorizar local → o conteúdo local é enviado por cima (`base_rev = rev online`). **Chats
-   com o mesmo id e histórias diferentes**: a versão perdedora é preservada como cópia local (§9.3).
+   com o mesmo id e histórias diferentes**: a versão perdedora é descartada (o diálogo do merge avisa
+   antes: "N chats existem nos dois lados com histórias diferentes; a versão não priorizada será apagada").
    Registro apagado online e presente local: priorizar online → apaga local; priorizar local → recria
    (`base_rev = rev do tombstone`).
 7. Envia: blobs primeiro (`/blobs/check` + `PUT`), depois os registros em lotes (LWW juntos; conteúdo
@@ -1474,24 +1476,22 @@ sequenceDiagram
     end
 ```
 
-### 16.8 Host offline: aguardar (entrega quando voltar)
+### 16.8 Host offline e queda no meio de um comando
 
 ```mermaid
 sequenceDiagram
     participant R as Controle remoto
     participant S as Servidor
-    participant H as Host (offline)
-    R->>R: "PC está offline — Rodar aqui · Aguardar" → Aguardar
-    R->>S: remote.send {kind send, store_if_offline:true}
-    S-->>R: ack {stored}
-    S-->>R: chat.state (pending +1, expires_at)
-    H->>S: hello (reconectou)
-    S-->>H: welcome
-    S->>H: remote.command (pendentes em FIFO)
-    H->>S: host.begin / roda o turno
-    H->>S: remote.result {accepted}
-    S-->>R: remote.result
-    S-->>R: chat.state (pending −1)
+    participant H as Host
+    R->>S: remote.send {kind send}
+    S->>H: remote.command
+    S-->>R: ack {delivered}
+    H--xS: conexão cai antes do remote.result
+    S-->>R: remote.failed {host_offline} → "O host (PC) caiu antes de confirmar"
+    S-->>R: chat.state {event: host_dropped} (após 10 s)
+    R->>R: composer desabilitado: "O host (PC) está offline" · [Executar neste dispositivo]
+    R->>S: remote.send (nova tentativa)
+    S-->>R: error host_offline
 ```
 
 ### 16.9 Assumir um host offline ("Rodar aqui")
@@ -1504,7 +1504,6 @@ sequenceDiagram
     N->>N: aviso de ferramentas locais / confirmação (se fixado)
     N->>S: host.takeover {force, confirm_pinned}
     S-->>N: ack {granted, epoch 8, head 905}
-    S-->>N: remote.command (comandos guardados)
     N->>N: puxa até 905, escolhe a raiz local, atualiza chat.hostCwd
     N->>S: host.begin {epoch 8} … turno … host.end
     H->>S: hello (volta depois)
@@ -1547,13 +1546,12 @@ sequenceDiagram
     S-->>D: error chat_diverged
     S-->>O: chat.state {event: diverged}
     D->>S: GET /records?scope=chat (versão online)
-    D->>D: usuário escolhe
+    D->>D: usuário escolhe + confirma "a outra versão será apagada"
     alt manter local
-        D->>D: cópia local da versão online
-        D->>S: POST divergence/resolve {X, keep local, items}
+        D->>S: POST divergence/resolve {X, keep local, items (puts + tombstones)}
     else manter online
-        D->>D: cópia local da versão deste dispositivo; aplica a online
         D->>S: POST divergence/resolve {X, keep online}
+        D->>D: apaga a versão local; aplica a online
     end
     S-->>D: 200
     S-->>O: sync.changes + chat.state {event: resolved}
@@ -1642,8 +1640,7 @@ sequenceDiagram
 | `HOST_DROP_GRACE_S` | 10 |
 | `SERVER_RESTART_GRACE_S` | 60 |
 | `HANDOVER_FORCE_TIMEOUT_S` | 20 |
-| `COMMAND_TTL_H` (comando `send` guardado) | 72 |
-| `MAX_PENDING_COMMANDS_PER_CHAT` | 50 |
+| `COMMAND_RESULT_TIMEOUT_S` | 30 |
 | `COMMAND_MAX_BYTES` | 1 MiB (envelope) |
 | `TOMBSTONE_RETENTION_DAYS` | 180 |
 | `PUSH_RECEIPT_TTL_DAYS` | 7 |
@@ -1696,13 +1693,13 @@ responder `429` não revela se a conta existe.
 | `blob_missing` | 409 | push referencia blob não enviado (`details.missing`) |
 | `chat_busy` | 409 | janela aberta por outro dispositivo / apagar chat rodando |
 | `chat_diverged` | 409 | chat divergente (`details.diverged`) |
-| `divergence_discarded` | 409 | sua versão já foi descartada (`details.divergence_id`) → virar cópia local |
+| `divergence_discarded` | 409 | sua versão já foi descartada (`details.divergence_id`) → apagar a versão local e baixar a online |
 | `divergence_mismatch` | 409 | `divergence_id` velho / dispositivo errado |
 | `stale_base` | 409 | `chat_bases` maior que `head` |
 | `not_host` | 409 | não é o host / epoch velho (`details.state`) |
 | `no_host` | 409 | chat sem host e quem pede não pode hospedar |
 | `cannot_host` | 409 | dispositivo sem `can_host` |
-| `host_offline` | 409 | comando não guardável com host fora |
+| `host_offline` | 409 | comando remoto com o host fora (offline/tolerância) |
 | `host_pinned` | 409 | host fixado sem `confirm_pinned` |
 | `handover_pending` | 409 | troca de host em andamento |
 | `cursor_expired` | 410 | `since` abaixo do piso de tombstones |
@@ -1746,9 +1743,8 @@ sync_records(type TEXT, id TEXT, rev INTEGER, seq INTEGER, deleted INTEGER, PRIM
 sync_outbox(oid INTEGER PK, type, id, scope, base_rev, dirty_fields TEXT, deleted INTEGER, chat_base INTEGER NULL, created_at)
 sync_chat(chat_id TEXT PK, head INTEGER, local_cwd TEXT, needs_refetch INTEGER, offline_dirty INTEGER)
 sync_blobs(sha256 TEXT PK, blob_id TEXT, uploaded INTEGER)
-sync_local_only_chats(chat_id TEXT PK, reason TEXT, created_at)
 sync_commands_seen(cmd_id TEXT PK, at INTEGER)   -- dedupe de comandos remotos (host), 7 dias
-sync_remote_pending(cmd_id TEXT PK, chat_id, payload_json, status, created_at)   -- enviados como controle remoto
+sync_remote_pending(cmd_id TEXT PK, chat_id, payload_json, status, created_at)   -- enviados como controle remoto, aguardando resultado (só em memória basta)
 sync_skills(name TEXT PK, record_id, mode TEXT /* source|copy */, local_dir, bundle_sha256, rev)
 ```
 
