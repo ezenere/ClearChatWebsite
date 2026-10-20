@@ -348,6 +348,11 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
 - **Comandos remotos**: **não há fila guardada** (nem tabela). `remote.send` com o host online →
   repassa e guarda `cmd_id → remetente` só em memória até o `remote.result`; queda do host ou
   `COMMAND_RESULT_TIMEOUT_S` (30 s) → `remote.failed` ao remetente. Host fora → `host_offline` na hora.
+  Só os `kind` de `COMMAND_KINDS` passam (desde 1.3.0 inclui `fs.list`/`fs.read`, a leitura de arquivos
+  do host em pedaços); envelope de `remote.send` e de `remote.result` até `COMMAND_MAX_BYTES` (1 MiB).
+  Um arquivo grande são centenas de pares `remote.send`/`remote.result` de ~0,7 MiB — sem limite por
+  usuário além da fila por conexão (128 requisições / 16 MiB) e da fila de envio do hub (1000 msgs /
+  8 MiB, acima → `4429`); o app mantém 3 pedaços em voo (≤ ~2,8 MiB), bem abaixo.
 - **Jobs** (asyncio, a cada 5 min, com `pg_try_advisory_lock` para nunca rodar em dobro):
   tombstones > 180 d (atualiza `tombstone_floor`), blobs sem referência > 24 h (apaga arquivo e linha),
   `push_receipts` > 7 d, `email_codes` expirados > 1 d, `rate_counters` velhos, `activity` > 90 d, `access_tokens` expirados,
@@ -370,7 +375,7 @@ As interpretações adotadas durante a implementação (corpos de resposta de `/
 `divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
 tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
 sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
-`docs/SYNC_PROTOCOL.md` (v1.2.0, ainda não lançado) — vale o que está lá.
+`docs/SYNC_PROTOCOL.md` (v1.3.0, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 

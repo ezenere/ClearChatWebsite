@@ -169,6 +169,49 @@ async def test_remote_branch_commands_relay(srv):
     await ca.no_event("remote.command")
 
 
+async def test_remote_fs_commands_relay(srv):
+    # protocolo 1.3.0 (§8.6): arquivos do host — fs.list / fs.read passam sem janela; o resultado de um
+    # pedaço cheio (512 KiB crus em base64 → ~0,7 MiB de envelope) cabe em COMMAND_MAX_BYTES, com
+    # vários pedaços em voo; acima do teto o resultado é recusado; kinds parecidos continuam recusados
+    a, b, ca, cb = await setup(srv)
+    await ca.ack("host.begin", chat_id="c1", epoch=None, purpose="run")
+    await ca.ack("host.end", chat_id="c1", epoch=1)
+    e = env()
+    r = await cb.ack("remote.send", chat_id="c1", cmd_id="fs-list", kind="fs.list", env=e)
+    assert r["status"] == "delivered"
+    cmd = await ca.event("remote.command")
+    assert cmd["cmd_id"] == "fs-list" and cmd["kind"] == "fs.list" and cmd["env"] == e
+    assert cmd["from_device_id"] == b.device_id
+    res_env = env(300 * 1024)
+    await ca.ack("remote.result", chat_id="c1", cmd_id="fs-list", env=res_env)
+    res = await cb.event("remote.result")
+    assert res == {"t": "remote.result", "chat_id": "c1", "cmd_id": "fs-list", "env": res_env}
+    # 3 pedaços em voo (como o app), resultados de ~0,7 MiB
+    for i in range(3):
+        r = await cb.ack("remote.send", chat_id="c1", cmd_id=f"fs-read-{i}", kind="fs.read", env=env())
+        assert r["status"] == "delivered"
+    for i in range(3):
+        cmd = await ca.event("remote.command")
+        assert cmd["kind"] == "fs.read" and cmd["cmd_id"] == f"fs-read-{i}"
+    envs = {f"fs-read-{i}": env(700 * 1024 + i) for i in range(3)}
+    for cid, ev in envs.items():
+        await ca.ack("remote.result", chat_id="c1", cmd_id=cid, env=ev)
+    for _ in range(3):
+        res = await cb.event("remote.result")
+        assert res["env"] == envs[res["cmd_id"]]
+    await cb.no_event("remote.failed")
+    # resultado acima do teto → payload_too_large (o host corta os pedaços para caber)
+    await cb.ack("remote.send", chat_id="c1", cmd_id="fs-big", kind="fs.read", env=env())
+    await ca.event("remote.command")
+    big = await ca.err("remote.result", chat_id="c1", cmd_id="fs-big", env=env(1024 * 1024 + 10))
+    assert big["code"] == "payload_too_large"
+    await cb.no_event("remote.result")
+    for kind in ("fs.write", "fs", "FS.READ", "fs.delete", "fs.list "):
+        err = await cb.err("remote.send", chat_id="c1", cmd_id="x", kind=kind, env=env())
+        assert err["code"] == "invalid_request" and (err.get("details") or {}).get("field") == "kind"
+    await ca.no_event("remote.command")
+
+
 async def test_remote_command_timeout(srv):
     a, b, ca, cb = await setup(srv)
     await ca.ack("host.begin", chat_id="c1", epoch=None, purpose="run")

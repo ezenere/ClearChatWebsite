@@ -60,7 +60,12 @@ COMMAND_KINDS = {
     "branch.edit",
     "branch.regenerate",
     "branch.select",
+    # desde 1.3.0: arquivos do host num controle remoto (só leitura; o resultado leva até 512 KiB
+    # crus em base64 → ~0,7 MiB de envelope, abaixo de COMMAND_MAX_BYTES)
+    "fs.list",
+    "fs.read",
 }
+# teto do envelope de remote.send, remote.result e host.release.forwarded[] (SYNC_PROTOCOL §17.1)
 COMMAND_MAX_BYTES = 1024 * 1024
 STREAM_MAX_BYTES = 256 * 1024
 STREAM_MAX_RATE = 50  # eventos/s por chat (acima disso o servidor descarta)

@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.2.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-19
+> **Versão do protocolo: 1.3.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-20
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -93,7 +93,7 @@ app (`createdAt` etc. dentro dos registros cifrados) em ms Unix, como no app hoj
 | `type`, `id`, `scope`, `rev`, `seq`, `deleted`, tamanho do ciphertext, timestamps do servidor, dispositivo que escreveu | sync, cascatas, cotas |
 | ids dos blobs referenciados por cada registro (`blobs`) e tamanho dos blobs | GC de blobs e cotas |
 | estado de host por chat (dispositivo host, epoch, rodando/ocioso, fixado, troca pendente, divergente) | coordenação de execução |
-| tipo de cada comando remoto (`send`, `stop`…) e quem enviou | roteamento ao host e logs de uso |
+| tipo de cada comando remoto (`send`, `stop`, `fs.read`…), quem enviou e o tamanho do envelope | roteamento ao host e logs de uso |
 | parâmetros do KDF, salts, DEK embrulhada, `verifier` (SHA-256 de uma subchave) | desbloqueio; prova de posse |
 
 Tudo o mais — conteúdo de mensagens, títulos, configs, chaves de API, nomes de skills, nomes de arquivos,
@@ -1064,6 +1064,8 @@ servidor atualizado antes dos clientes.
 | `branch.edit` | `{ messageId, message: ApiMessage }` | `agent.editBranch` (desde 1.2.0: nova versão de uma mensagem do usuário — irmã com a mesma mãe — e roda o turno) |
 | `branch.regenerate` | `{ sessionId, messageId? }` | `agent.regenerate(sessionId, messageId?)` (desde 1.2.0: nova versão da resposta do turno que contém `messageId`; sem ele, o último turno) |
 | `branch.select` | `{ messageId }` | `agent.selectBranch` (desde 1.2.0: torna `messageId` a versão ativa — grava `branchSel`, §4.3.7) |
+| `fs.list` | `{ chatId, path }` | aba Arquivos (`fs.listDir`) do chat no host (desde 1.3.0; só leitura, sem janela — ver "Arquivos do host") |
+| `fs.read` | `{ chatId, path, offset, length }` | visualizador de arquivos do host, um pedaço por comando (desde 1.3.0; só leitura, sem janela) |
 
 Regras:
 - `skills`: nomes; o **host** resolve e lê o `SKILL.md` (as skills que valem são as do host — o host
@@ -1083,6 +1085,43 @@ Regras:
   `message.edit`. Controles remotos ≥ 1.2.0 DEVEM mandar `branch.edit` para mensagens do usuário e
   `branch.regenerate` (nunca `regenerate`): um host antigo recusa o kind desconhecido em vez de apagar
   as outras versões. O site não manda comandos: nele, trocar de versão é só na tela (§4.3.7).
+- **Arquivos do host (desde 1.3.0)**: `fs.list` e `fs.read` deixam um controle remoto navegar pela aba
+  Arquivos do chat e abrir arquivos no visualizador com os bytes vindos do host, cifrados de ponta a
+  ponta como qualquer comando. **Não** são comandos de conteúdo: não abrem janela, não gravam nada, são
+  aceitos com o agente rodando e o host NÃO os deduplica (repetir uma leitura é inofensivo).
+  - Regras de caminho: o host aplica **exatamente** as regras da aba Arquivos e das tools de leitura
+    daquele chat **nele**: raiz = diretório raiz do chat no host (`config.cwd` local do host, §4.4);
+    `path` relativo resolve contra a raiz, `~` = home do host, vazio (`fs.list`) = a raiz; com
+    `confineToRoot` (padrão) nada fora da raiz depois de `realpath` (`..`, caminho absoluto de fora ou
+    symlink apontando para fora → recusado); sem confinamento, o mesmo que a aba Arquivos do host já
+    mostra localmente. `fs.read` só lê **arquivo comum** (diretório, FIFO, dispositivo, socket →
+    recusado) e confere tudo de novo a cada pedaço. `payload.chatId` DEVE ser igual ao `chat_id` do
+    frame (a AAD já amarra o chat; diferente → recusado).
+  - `fs.list` → resultado `{ sv: 1, status: 'accepted', dir, root, confine, truncated, entries: [{ name,
+    kind: 'file'|'dir', size?, mtime? }] }`: `dir` = pasta listada (absoluta, no formato do host), `root`
+    e `confine` = raiz e confinamento do chat no host (o controle remoto mostra a raiz do host, não a
+    sua), pastas primeiro; no máximo `FS_LIST_MAX_ENTRIES` entradas e ~600 KiB de JSON (acima:
+    `truncated: true`). `size` só em arquivos; `mtime` em ms Unix.
+  - `fs.read` → resultado `{ sv: 1, status: 'accepted', size, mtime, mime?, offset, data }`: `data` =
+    base64 (padrão, com `=`) de até `FS_READ_CHUNK_BYTES` bytes a partir de `offset` (o host corta
+    pedidos maiores; além do fim → `data: ""`; `length: 0` = só `size`/`mtime`); `size`/`mtime` atuais
+    do arquivo (o controle remoto confere em cada pedaço — mudou no meio → recomeça ou avisa); `mime`
+    (tipo detectado pelo host) só no pedaço com `offset: 0`. O host recusa ler a partir de
+    `FS_READ_MAX_FILE_BYTES` (um pedido que cruza o teto é cortado nele). Com `FS_READ_CHUNK_BYTES` =
+    512 KiB, o envelope do `remote.result` fica em ~0,7 MiB — abaixo de `COMMAND_MAX_BYTES` e do frame
+    de 4 MiB. O controle remoto DEVERIA manter poucos pedaços em voo (o app usa 3) para não encher a
+    fila de envio da sua conexão no servidor (que fecha com `4429` quando ela estoura).
+  - Recusa: `{ sv: 1, status: 'rejected', error: '<texto pt-BR>', code?: 'denied'|'missing'|'invalid'|'too_large' }`
+    (`denied` = fora da raiz confinada / sem permissão; `missing` = não existe / não é arquivo comum /
+    não é pasta; `too_large` = além do teto). Host < 1.3.0 recusa com `error: 'comando desconhecido:
+    fs.…'` e o controle remoto mostra "atualize o app no host"; servidor < 1.3.0 recusa o `kind` com
+    `invalid_request`.
+  - Segurança: só dispositivos da **mesma conta** mandam comandos (autenticação do WebSocket, §10) e
+    só ao host atual do chat; revogar o dispositivo corta o acesso na hora (4403, §5.4). Não há
+    capacidade nova: um controle remoto já pode pedir ao agente do host que leia/liste esses mesmos
+    arquivos (`read_file`/`list_dir` com as mesmas regras); `fs.*` só dispensam o modelo. O servidor vê
+    o `kind`, quem pediu e o tamanho dos envelopes (dá para estimar o tamanho do arquivo pela soma dos
+    pedaços), nunca nomes, caminhos nem conteúdo. O site não usa estes comandos (ainda).
 - **Só com o host online** (`host.status = online`): com host `grace`/`offline` → erro `host_offline` na
   hora; sem host → `no_host` (quem pode hospedar roda localmente, §8.7). Nada é guardado no servidor.
 - Entrega **no máximo uma vez**: o servidor mantém o comando só em memória, enquanto espera o resultado.
@@ -1090,7 +1129,9 @@ Regras:
   enviou recebe `remote.failed {code: 'host_offline' | 'command_timeout'}` e mostra um erro claro
   ("O host (<nome>) caiu antes de confirmar — a mensagem pode não ter sido entregue"), mantendo o texto
   no composer. O host DEVERIA deduplicar por `cmd_id` (reenvio manual reaproveita o id).
-- Resultado (`remote.result`, cifrado com AAD de resultado): `{ sv: 1, status: 'accepted'|'rejected'|'duplicate', queued?: boolean, error?: string }`.
+- Resultado (`remote.result`, cifrado com AAD de resultado): `{ sv: 1, status: 'accepted'|'rejected'|'duplicate', queued?: boolean, error?: string }`
+  (`fs.list`/`fs.read` acrescentam os campos acima). O envelope do resultado tem o mesmo teto
+  `COMMAND_MAX_BYTES` do comando.
 - Com o chat divergente → `chat_diverged`.
 - O controle remoto mostra a mensagem como "enviando…" até `accepted`.
 
@@ -1785,7 +1826,8 @@ sequenceDiagram
 | `SERVER_RESTART_GRACE_S` | 60 |
 | `HANDOVER_FORCE_TIMEOUT_S` | 20 |
 | `COMMAND_RESULT_TIMEOUT_S` | 30 |
-| `COMMAND_MAX_BYTES` | 1 MiB (envelope) |
+| `COMMAND_MAX_BYTES` | 1 MiB (envelope de `remote.send`, `remote.result` e `host.release.forwarded[]`) |
+| `FS_READ_CHUNK_BYTES` / `FS_READ_MAX_FILE_BYTES` / `FS_LIST_MAX_ENTRIES` (host, §8.6) | 512 KiB por `fs.read` / 200 MiB por arquivo / 5000 entradas |
 | `TOMBSTONE_RETENTION_DAYS` | 180 |
 | `PUSH_RECEIPT_TTL_DAYS` | 7 |
 | `BLOB_ORPHAN_GRACE_H` | 24 |
@@ -1883,6 +1925,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 | 1.1.0 | 2026-10-19 | Adições compatíveis: `quota_exceeded` com `details.kind: 'chat_states'` — teto de estados de chat por usuário em `host.begin`/`host.takeover`/`host.pin` ao criar o estado de um chat (§7.10, §8.3, §8.8, §8.9, §10.4, §17.2, §17.4); `records/fetch`/`sync.fetch` com o orçamento de ~8 MiB por resposta, o cliente pede de novo os `omitted: true` até acabarem (§6.7, §7.2, §10.4). Texto: §17.3 — `code/verify` limitado por e-mail + rede do cliente (teto de 200/h por e-mail), bloqueio contando só erros contra um código vivo, código não enviado para o bloqueio não revelar contas, limite de 10/h para troca de wrap; §5.4 — reuso vale para qualquer refresh já rotacionado. |
 | 1.1.1 | 2026-10-19 | Texto (sem mudança de formato): §8.3/§8.4/§9.1 — `chat_bases[X] < head(X)` só marca divergência se houver conteúdo de X com `seq > base` escrito por outro dispositivo; se tudo depois da base é do próprio remetente (ex.: chat novo enviado em vários lotes com a mesma base), o push segue como `b == head`. `divergence_discarded` continua checado antes. |
 | 1.2.0 | 2026-10-19 | Adições compatíveis — versões de mensagens (ramos): `message.parentId?` (mãe no mesmo ramo; ausente = derivada como a anterior por `seq`) com o algoritmo normativo do caminho ativo e dos irmãos e a invariante `seq(mãe) < seq` (§4.3.8); `session.branchSel?` (versão escolhida por bifurcação, sempre enviado, `{}` quando vazio; `null` = caminho termina ali) (§4.3.7); comandos `branch.edit`, `branch.regenerate`, `branch.select` (§8.6), com `regenerate` virando regenerar em ramo e o host 0.7 recusando `message.edit` em mensagem digitada pelo usuário na sessão principal; trocar de versão entra nas mutações de conteúdo (§8.4); `migration.messageTree` local (§4.4); site troca de versão só na tela; fixture `docs/test-vectors/branches.json` escrito à mão (§3.15); tipos de referência do app 0.7.x (§4.3). |
+| 1.3.0 | 2026-10-20 | Adições compatíveis — arquivos do host num controle remoto: comandos `fs.list` (pasta do chat no host, com raiz/confinamento do host) e `fs.read` (pedaços de até 512 KiB em base64 dentro do resultado cifrado, teto de 200 MiB por arquivo), só leitura, sem janela, sem dedupe, aceitos com o agente rodando, com as mesmas regras de caminho da aba Arquivos/tools de leitura do host e recusa com `code` (§8.6); `COMMAND_MAX_BYTES` explicitado também para o `remote.result` e constantes `FS_*` (§17.1); §2 cita o tamanho dos envelopes de comando. Servidor ≥ 1.3.0 precisa repassar os kinds novos antes de os apps os usarem. |
 
 ---
 
