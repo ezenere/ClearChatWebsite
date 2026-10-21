@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.3.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-20
+> **Versão do protocolo: 1.4.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-21
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -347,8 +347,11 @@ apagar `memory_collection` remove os `memory` com `scope = collection_id` (§7.7
 ### 4.3 Esquemas do plaintext
 
 Todo plaintext é um objeto JSON com `sv` (versão do esquema do tipo, hoje `1`). Os tipos referenciados
-(`ChatConfig`, `ApiMessage`, `MessageMeta`, `MemoryConfig`, `SkillsConfig`, `EngineConfig`…) são
-**exatamente** os de `src/shared/*.ts` do app na versão 0.7.x. Leitores DEVEM ignorar campos
+(`ChatConfig`, `ApiMessage`, `MessageMeta`, `MemoryConfig`, `SkillsConfig`, `EngineConfig`,
+`SmartApproveDefaults`, `AutoTitleSettings`…) são **exatamente** os de `src/shared/*.ts` do app na versão
+0.8.x (desde 1.4.0; antes, 0.7.x — os campos que entraram depois são todos opcionais/aditivos, ex.:
+`ChatConfig.acceptEditsInRoot`, `ChatConfig.capturedContext`, `SmartApproveConfig.canDeny`/`judgeWhitelisted`/
+`environment`/`capture`/`capturePrompts`, `MessageMeta.autoTitle`/`presentFiles`/`reasoningMs`). Leitores DEVEM ignorar campos
 desconhecidos e DEVEM preservá-los ao regravar (merge por campo); escritores NÃO DEVEM enviar `undefined`.
 
 #### 4.3.1 `provider`
@@ -376,9 +379,20 @@ Registros `setting` **nunca** são tombstones (ids fixos): remover = `value: nul
 | `webSearchEngines` | `webSearchEngines` | `EngineConfig[]` |
 | `webSearchApiKeys` | `webSearchApiKeys` | `{ 'brave-api'?: string, exa?: string, tavily?: string }` |
 | `webSearchMinIntervalSec` | `webSearchMinIntervalSec` | `number` |
+| `smartApproveDefaults` (desde 1.4.0) | `smartApproveDefaults` | `SmartApproveDefaults` = `{ environment: string, acceptEditsInRoot: boolean, capture: ContextCaptureConfig, capturePrompts?: { prompt: string \| null, template: string \| null, derivePrompt: string \| null } }` (`ContextCaptureConfig` = `{ enabled, providerId: string \| null, model: string \| null, maxTokens: number \| null, lookback }`) |
+| `autoTitle` (desde 1.4.0) | `autoTitle` | `AutoTitleSettings` = `{ providerId: string \| null, model: string \| null, useMemory: boolean, maxTokens: number, prompt: string \| null }` |
+| `toolOutputSpillChars` (desde 1.4.0) | `toolOutputSpillChars` | `number` (caracteres; o app limita à faixa dele) |
 
 O par do modelo padrão vira **um** registro para nunca misturar provedor de um dispositivo com modelo
-de outro.
+de outro. Os `providerId` dentro de `smartApproveDefaults.capture` e de `autoTitle` são ids de registros
+`provider` (como `defaultModel.providerId`): o leitor resolve pelo id, e um provedor que não existe
+localmente vale como "sem modelo" (nunca cai noutro provedor).
+
+**Ids novos num dispositivo que já sincronizava (desde 1.4.0).** Ao ganhar um id de `setting` novo, o
+cliente DEVERIA, uma única vez e **depois** de um pull completo, enviar o valor local dos ids novos que
+ainda não têm registro online (se já existe registro — outro dispositivo enviou antes — vale o online,
+aplicado pelo pull). Leitores que não conhecem um id de `setting` (clientes < 1.4.0) o ignoram e
+guardam o registro (§4.2).
 
 #### 4.3.3 `preset` (persona)
 
@@ -524,10 +538,11 @@ Ver §13 (formato do bundle).
 | `defaultCwd` | `settings` | pasta padrão desta máquina |
 | `skillsSettings` (locais de skills, `projectSkills`) | `settings` | pastas desta máquina |
 | `presetsSeeded`, `migration.*` (`toolShellRename`, `approvalModes`, `smartApproveItems`, `searchIndex`, `messageTree`) | `settings` | estado de migração local |
+| `updateDismissedVersion` (aviso de versão nova dispensado) | `settings` | cada instalação tem a sua versão do app |
 | índices FTS (`message_search`, `messages_fts`, `memories_fts`) | SQLite | derivados; reconstruídos localmente |
 | fila da sessão (`QueuedMessage`), aprovações/questionários/retries pendentes, processos em segundo plano | memória do main | estado de execução do host (vai ao vivo pelo stream, §11) |
 | arquivos do store de anexos | `userData/attachments` | sincronizados como blobs (§14), mas o store é local |
-| cache de modelos, `localStorage` da UI (aba do painel, grupos recolhidos…) | renderer | preferências de UI |
+| cache de modelos, `localStorage` da UI (aba do painel, seções recolhidas, grupos recolhidos, largura do painel de arquivo…) | renderer | estado de UI / tamanho de tela |
 | estado do próprio sync (cursor, outbox, revs, credenciais, DEK) | tabelas `sync_*` / chaveiro | por dispositivo |
 | skills não marcadas para sync | pastas | opt-in (§13) |
 
@@ -1419,8 +1434,10 @@ do servidor.
 | `skill` | não entra no merge (opt-in, §13) |
 
 5. **Remapeamento** de referências locais (ids locais deduplicados → ids online): `ChatConfig.providerId`,
-   `ChatConfig.smartApprove.providerId`, `ChatConfig.memory.extraction.providerId`, `Session.providerId`,
-   os mesmos campos em `PresetConfig`, setting `defaultModel.providerId`; `ChatConfig.presetId`, setting
+   `ChatConfig.smartApprove.providerId`, `ChatConfig.smartApprove.capture.providerId`,
+   `ChatConfig.memory.extraction.providerId`, `Session.providerId`, os mesmos campos em `PresetConfig`,
+   settings `defaultModel.providerId`, `smartApproveDefaults.capture.providerId` e `autoTitle.providerId`
+   (desde 1.4.0); `ChatConfig.presetId`, setting
    `defaultPresetId`; `ChatConfig.memory.collections[]` e `writeTo` (chats e personas), `Memory.collectionId`;
    `Memory.supersedesId`. Metadados informativos em `MessageMeta` não são remapeados.
 6. **Conteúdo vencedor**: priorizar online → o conteúdo online fica e o local é descartado para essas
@@ -1926,6 +1943,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 | 1.1.1 | 2026-10-19 | Texto (sem mudança de formato): §8.3/§8.4/§9.1 — `chat_bases[X] < head(X)` só marca divergência se houver conteúdo de X com `seq > base` escrito por outro dispositivo; se tudo depois da base é do próprio remetente (ex.: chat novo enviado em vários lotes com a mesma base), o push segue como `b == head`. `divergence_discarded` continua checado antes. |
 | 1.2.0 | 2026-10-19 | Adições compatíveis — versões de mensagens (ramos): `message.parentId?` (mãe no mesmo ramo; ausente = derivada como a anterior por `seq`) com o algoritmo normativo do caminho ativo e dos irmãos e a invariante `seq(mãe) < seq` (§4.3.8); `session.branchSel?` (versão escolhida por bifurcação, sempre enviado, `{}` quando vazio; `null` = caminho termina ali) (§4.3.7); comandos `branch.edit`, `branch.regenerate`, `branch.select` (§8.6), com `regenerate` virando regenerar em ramo e o host 0.7 recusando `message.edit` em mensagem digitada pelo usuário na sessão principal; trocar de versão entra nas mutações de conteúdo (§8.4); `migration.messageTree` local (§4.4); site troca de versão só na tela; fixture `docs/test-vectors/branches.json` escrito à mão (§3.15); tipos de referência do app 0.7.x (§4.3). |
 | 1.3.0 | 2026-10-20 | Adições compatíveis — arquivos do host num controle remoto: comandos `fs.list` (pasta do chat no host, com raiz/confinamento do host) e `fs.read` (pedaços de até 512 KiB em base64 dentro do resultado cifrado, teto de 200 MiB por arquivo), só leitura, sem janela, sem dedupe, aceitos com o agente rodando, com as mesmas regras de caminho da aba Arquivos/tools de leitura do host e recusa com `code` (§8.6); `COMMAND_MAX_BYTES` explicitado também para o `remote.result` e constantes `FS_*` (§17.1); §2 cita o tamanho dos envelopes de comando. Servidor ≥ 1.3.0 precisa repassar os kinds novos antes de os apps os usarem. |
+| 1.4.0 | 2026-10-21 | Adições compatíveis — preferências que eram locais passam a sincronizar como registros `setting`: `smartApproveDefaults` (padrões globais do Smart-Approve: descrição do ambiente, "aceitar edições dentro da raiz", coleta de contexto e os prompts do resumidor `capturePrompts`), `autoTitle` (título automático) e `toolOutputSpillChars` (limite para salvar saídas de tool em arquivo) (§4.3.2); envio único dos ids novos depois do primeiro pull num dispositivo que já sincronizava (§4.3.2); remapeamento no merge dos `providerId` dentro deles e de `ChatConfig.smartApprove.capture` (§12); `updateDismissedVersion` e a largura do painel de arquivo listados como locais (§4.4); tipos de referência do app 0.8.x, com os campos opcionais novos da config do chat/persona citados (§4.3). Servidor: nenhuma mudança de comportamento (ids de `setting` não são filtrados) — só a versão informada em `/api/info`/`welcome`. |
 
 ---
 

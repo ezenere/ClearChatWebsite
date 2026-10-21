@@ -7,7 +7,7 @@ async def test_info(srv):
     r = await srv.http.get("/api/info")
     assert r.status_code == 200
     b = r.json()
-    assert b["protocol"] == {"min": 1, "max": 1, "version": "1.3.0"}
+    assert b["protocol"] == {"min": 1, "max": 1, "version": "1.4.0"}
     assert b["features"]["captcha"] is None
     assert b["links"]["signup"] == "http://clear.test/signup"
 

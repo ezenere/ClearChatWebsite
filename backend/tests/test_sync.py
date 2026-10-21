@@ -49,6 +49,21 @@ async def test_seq_contiguous_and_pull_pages(srv):
     assert [c["id"] for c in r["changes"]].count("p0") == 1 and r["changes"][-1]["rev"] == 2
 
 
+async def test_setting_ids_not_filtered(srv):
+    # protocolo 1.4.0 (§4.3.2): ids de setting novos do app passam sem mudar o servidor (LWW inteiro,
+    # nunca tombstone); só o padrão de id vale
+    s = await srv.signup()
+    ids = ["smartApproveDefaults", "autoTitle", "toolOutputSpillChars"]
+    r = await srv.push(s, [item("setting", i) for i in ids])
+    assert r.status_code == 200 and [x["seq"] for x in r.json()["results"]] == [1, 2, 3]
+    r = await srv.push(s, [item("setting", "autoTitle", base_rev=1)])
+    assert r.status_code == 200 and r.json()["results"][0]["rev"] == 2
+    r = (await srv.http.get("/api/v1/sync/changes?since=0", headers=s.h)).json()
+    assert sorted(c["id"] for c in r["changes"]) == sorted(ids)
+    r = await srv.push(s, [item("setting", "autoTitle", base_rev=2, deleted=True)])
+    assert r.status_code == 400
+
+
 async def test_idempotent_push(srv):
     s = await srv.signup()
     body = {"push_id": str(uuid.uuid4()), "items": [item("provider", "p1")]}
