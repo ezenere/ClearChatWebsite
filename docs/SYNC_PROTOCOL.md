@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.4.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-21
+> **Versão do protocolo: 1.4.1** · status: contrato inicial (ainda sem implementação) · data: 2026-10-21
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -351,7 +351,8 @@ Todo plaintext é um objeto JSON com `sv` (versão do esquema do tipo, hoje `1`)
 `SmartApproveDefaults`, `AutoTitleSettings`…) são **exatamente** os de `src/shared/*.ts` do app na versão
 0.8.x (desde 1.4.0; antes, 0.7.x — os campos que entraram depois são todos opcionais/aditivos, ex.:
 `ChatConfig.acceptEditsInRoot`, `ChatConfig.capturedContext`, `SmartApproveConfig.canDeny`/`judgeWhitelisted`/
-`environment`/`capture`/`capturePrompts`, `MessageMeta.autoTitle`/`presentFiles`/`reasoningMs`). Leitores DEVEM ignorar campos
+`environment`/`capture`/`capturePrompts`/`thinkingTokens`/`cache` (os dois últimos desde 1.4.1), `ContextCaptureConfig.thinkingTokens`/`cache` (desde 1.4.1),
+`MessageMeta.autoTitle`/`presentFiles`/`reasoningMs`). Leitores DEVEM ignorar campos
 desconhecidos e DEVEM preservá-los ao regravar (merge por campo); escritores NÃO DEVEM enviar `undefined`.
 
 #### 4.3.1 `provider`
@@ -379,8 +380,8 @@ Registros `setting` **nunca** são tombstones (ids fixos): remover = `value: nul
 | `webSearchEngines` | `webSearchEngines` | `EngineConfig[]` |
 | `webSearchApiKeys` | `webSearchApiKeys` | `{ 'brave-api'?: string, exa?: string, tavily?: string }` |
 | `webSearchMinIntervalSec` | `webSearchMinIntervalSec` | `number` |
-| `smartApproveDefaults` (desde 1.4.0) | `smartApproveDefaults` | `SmartApproveDefaults` = `{ environment: string, acceptEditsInRoot: boolean, capture: ContextCaptureConfig, capturePrompts?: { prompt: string \| null, template: string \| null, derivePrompt: string \| null } }` (`ContextCaptureConfig` = `{ enabled, providerId: string \| null, model: string \| null, maxTokens: number \| null, lookback }`) |
-| `autoTitle` (desde 1.4.0) | `autoTitle` | `AutoTitleSettings` = `{ providerId: string \| null, model: string \| null, useMemory: boolean, maxTokens: number, prompt: string \| null }` |
+| `smartApproveDefaults` (desde 1.4.0) | `smartApproveDefaults` | `SmartApproveDefaults` = `{ environment: string, acceptEditsInRoot: boolean, capture: ContextCaptureConfig, capturePrompts?: { prompt: string \| null, template: string \| null, derivePrompt: string \| null } }` (`ContextCaptureConfig` = `{ enabled, providerId: string \| null, model: string \| null, maxTokens: number \| null, lookback, thinkingTokens?: number \| null, cache?: boolean }` — `thinkingTokens` e `cache` desde 1.4.1, opcionais; `cache` ausente = ligado) |
+| `autoTitle` (desde 1.4.0) | `autoTitle` | `AutoTitleSettings` = `{ providerId: string \| null, model: string \| null, useMemory: boolean, maxTokens: number, prompt: string \| null, thinkingTokens?: number \| null }` (`thinkingTokens` desde 1.4.1, opcional) |
 | `toolOutputSpillChars` (desde 1.4.0) | `toolOutputSpillChars` | `number` (caracteres; o app limita à faixa dele) |
 
 O par do modelo padrão vira **um** registro para nunca misturar provedor de um dispositivo com modelo
@@ -1944,6 +1945,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 | 1.2.0 | 2026-10-19 | Adições compatíveis — versões de mensagens (ramos): `message.parentId?` (mãe no mesmo ramo; ausente = derivada como a anterior por `seq`) com o algoritmo normativo do caminho ativo e dos irmãos e a invariante `seq(mãe) < seq` (§4.3.8); `session.branchSel?` (versão escolhida por bifurcação, sempre enviado, `{}` quando vazio; `null` = caminho termina ali) (§4.3.7); comandos `branch.edit`, `branch.regenerate`, `branch.select` (§8.6), com `regenerate` virando regenerar em ramo e o host 0.7 recusando `message.edit` em mensagem digitada pelo usuário na sessão principal; trocar de versão entra nas mutações de conteúdo (§8.4); `migration.messageTree` local (§4.4); site troca de versão só na tela; fixture `docs/test-vectors/branches.json` escrito à mão (§3.15); tipos de referência do app 0.7.x (§4.3). |
 | 1.3.0 | 2026-10-20 | Adições compatíveis — arquivos do host num controle remoto: comandos `fs.list` (pasta do chat no host, com raiz/confinamento do host) e `fs.read` (pedaços de até 512 KiB em base64 dentro do resultado cifrado, teto de 200 MiB por arquivo), só leitura, sem janela, sem dedupe, aceitos com o agente rodando, com as mesmas regras de caminho da aba Arquivos/tools de leitura do host e recusa com `code` (§8.6); `COMMAND_MAX_BYTES` explicitado também para o `remote.result` e constantes `FS_*` (§17.1); §2 cita o tamanho dos envelopes de comando. Servidor ≥ 1.3.0 precisa repassar os kinds novos antes de os apps os usarem. |
 | 1.4.0 | 2026-10-21 | Adições compatíveis — preferências que eram locais passam a sincronizar como registros `setting`: `smartApproveDefaults` (padrões globais do Smart-Approve: descrição do ambiente, "aceitar edições dentro da raiz", coleta de contexto e os prompts do resumidor `capturePrompts`), `autoTitle` (título automático) e `toolOutputSpillChars` (limite para salvar saídas de tool em arquivo) (§4.3.2); envio único dos ids novos depois do primeiro pull num dispositivo que já sincronizava (§4.3.2); remapeamento no merge dos `providerId` dentro deles e de `ChatConfig.smartApprove.capture` (§12); `updateDismissedVersion` e a largura do painel de arquivo listados como locais (§4.4); tipos de referência do app 0.8.x, com os campos opcionais novos da config do chat/persona citados (§4.3). Servidor: nenhuma mudança de comportamento (ids de `setting` não são filtrados) — só a versão informada em `/api/info`/`welcome`. |
+| 1.4.1 | 2026-10-21 | Adições compatíveis (só campos opcionais em objetos que já sincronizam): "Tokens de pensamento" das chamadas laterais com raciocínio obrigatório — `SmartApproveConfig.thinkingTokens` (juiz; na config do chat/persona), `ContextCaptureConfig.thinkingTokens` (resumidor; em `smartApprove.capture` e `smartApproveDefaults.capture`) e `AutoTitleSettings.thinkingTokens` (título), cada um `number \| null`, ausente/`null` = o padrão do app; e o liga/desliga do "Cache do prompt" — `SmartApproveConfig.cache` (juiz) e `ContextCaptureConfig.cache` (resumidor; em `smartApprove.capture` e `smartApproveDefaults.capture`), `boolean`, ausente = ligado (o app só grava `false`) (§4.3, §4.3.2). Nenhum id de `setting` novo (sem envio único). Servidor: nenhuma mudança de comportamento — só a versão informada em `/api/info`/`welcome`. |
 
 ---
 
