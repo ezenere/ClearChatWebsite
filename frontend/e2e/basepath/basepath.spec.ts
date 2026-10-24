@@ -12,7 +12,7 @@ test('build servido em sub-caminho (/clearchat): deep link, login, desbloqueio (
   await page.getByLabel('Senha de criptografia').fill(DEMO.password)
   await page.getByRole('button', { name: 'Desbloquear' }).click()
   await expect(page).toHaveURL(/\/clearchat\/app\/providers$/)
-  await expect(page.getByTestId('provider-card')).toHaveCount(3)
+  await expect(page.getByTestId('provider-card')).toHaveCount(4)
   await page.getByRole('link', { name: 'Conversas', exact: true }).click()
   await expect(page).toHaveURL(/\/clearchat\/app$/)
   // âncora interna da landing não sai da página

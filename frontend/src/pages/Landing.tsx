@@ -1,25 +1,34 @@
 // Página inicial (só com `features.landing`): apresenta o ClearChat, downloads e self-host.
-import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
+// Os efeitos e as demos interativas ficam em ./landing/.
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
 import {
   ArrowRight,
+  AudioLines,
   Bot,
   Boxes,
   Brain,
   Check,
+  Cloud,
+  Cpu,
   Download,
   Eye,
+  Globe,
   HandMetal,
   KeyRound,
   Laptop,
-  LockKeyhole,
   Menu,
+  Mic,
+  MousePointer2,
+  PhoneOff,
   Server,
   ShieldCheck,
   Smartphone,
   Sparkles,
   Terminal,
-  X
+  UserRound,
+  X,
+  Zap
 } from 'lucide-react'
 import { AppIcon, Wordmark } from '../components/Logo'
 import { Button, CopyButton, cx } from '../components/ui'
@@ -33,12 +42,25 @@ import {
   type Release
 } from '../lib/releases'
 import { useSession } from '../state/session'
+import { Orb } from './landing/Orb'
+import { CallTicker } from './landing/CallTicker'
+import { VoiceLab } from './landing/VoiceLab'
+import { ApprovalDemo } from './landing/ApprovalDemo'
+import { RequestInspector } from './landing/RequestInspector'
+import { CryptoPlayground } from './landing/CryptoPlayground'
+import { CursorGlow, Marquee, SpotCard, Tilt } from './landing/fx'
+import { useReveal } from './landing/hooks'
+import './landing/landing.css'
 import shotChat from '../assets/screenshots/chat.webp'
 import shotQueue from '../assets/screenshots/aprovacoes-fila.webp'
 import shotAsk from '../assets/screenshots/questionario.webp'
 import shotLists from '../assets/screenshots/configuracoes-aprovacoes.webp'
 import shotMemory from '../assets/screenshots/memoria.webp'
-import shotMarkdown from '../assets/screenshots/markdown.webp'
+import shotCall from '../assets/screenshots/voz-chamada.webp'
+import shotDictation from '../assets/screenshots/composer-ditado.webp'
+import shotVoiceSettings from '../assets/screenshots/voz-configuracoes.webp'
+import shotGpu from '../assets/screenshots/modelos-locais-gpu.webp'
+import shotPersona from '../assets/screenshots/personas.webp'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -51,16 +73,70 @@ function GithubIcon({ className }: { className?: string }) {
 const REPO_URL = 'https://github.com/ezenere/ClearChat'
 const SERVER_REPO_URL = 'https://github.com/ezenere/ClearChatWebsite'
 
-const FEATURES: { icon: ReactNode; title: string; text: string }[] = [
+const STACK = [
+  'OpenRouter',
+  'Anthropic',
+  'OpenAI-compatible',
+  'ElevenLabs',
+  'Groq',
+  'Kokoro',
+  'whisper.cpp',
+  'XTTS-v2',
+  'OmniVoice',
+  'Qwen3-TTS',
+  'VibeVoice',
+  'faster-whisper',
+  'Agent Skills',
+  'DuckDuckGo',
+  'Brave',
+  'Exa',
+  'Tavily'
+]
+
+const VOICE: { icon: ReactNode; title: string; text: string }[] = [
+  {
+    icon: <Mic className="size-4" />,
+    title: 'Chamada e ditado',
+    text: 'Ligue de dentro de qualquer chat, ou dite no campo de mensagem e veja o texto surgir enquanto fala.'
+  },
+  {
+    icon: <AudioLines className="size-4" />,
+    title: 'Soa como gente',
+    text: '“Hmm, deixa eu ver aqui…” enquanto o modelo pensa — e um “desculpe a demora” se a resposta atrasar.'
+  },
+  {
+    icon: <UserRound className="size-4" />,
+    title: 'Voz por persona',
+    text: 'Cada persona com a sua voz, o seu modelo e um prompt extra só para chamadas — ou sem chamadas.'
+  },
+  {
+    icon: <PhoneOff className="size-4" />,
+    title: 'Ele sabe desligar',
+    text: 'O agente encerra a chamada quando a conversa termina. Chamadas e mensagens de voz ficam marcadas no chat.'
+  },
+  {
+    icon: <Cloud className="size-4" />,
+    title: 'Na nuvem ou 100% local',
+    text: 'ElevenLabs (inclusive por WebSocket), OpenRouter e Groq — ou Kokoro e whisper.cpp na CPU, offline.'
+  },
+  {
+    icon: <Cpu className="size-4" />,
+    title: 'Modo avançado na GPU',
+    text: 'XTTS-v2, OmniVoice, Qwen3-TTS, VibeVoice e faster-whisper sob demanda, com checagem do hardware e vozes clonadas.'
+  }
+]
+
+const FEATURES: { icon: ReactNode; title: string; text: string; wide?: boolean }[] = [
   {
     icon: <Sparkles className="size-5" />,
     title: 'Qualquer provedor',
-    text: 'OpenAI-compatible, OpenRouter e Anthropic nativa. Parâmetros que o modelo não aceita somem do painel e não vão na request.'
+    text: 'OpenAI-compatible, OpenRouter e Anthropic nativa. Parâmetros que o modelo não aceita somem do painel e não vão na request.',
+    wide: true
   },
   {
     icon: <HandMetal className="size-5" />,
     title: 'Ferramentas com aprovação',
-    text: 'Shell, arquivos, processos, navegador e busca na web. Você decide por item: sempre, Smart-Approve, listas ou perguntar.'
+    text: 'Shell, arquivos, processos, navegador e busca na web — cada uma com a sua política.'
   },
   {
     icon: <Bot className="size-5" />,
@@ -70,22 +146,33 @@ const FEATURES: { icon: ReactNode; title: string; text: string }[] = [
   {
     icon: <Brain className="size-5" />,
     title: 'Memória modular',
-    text: 'Coleções por categoria (perfil, tópicos, pessoas…), ativadas por chat ou persona, editáveis a qualquer momento.'
+    text: 'Coleções por categoria (perfil, tópicos, pessoas…), ativadas por chat ou persona.'
   },
   {
     icon: <Boxes className="size-5" />,
     title: 'Skills',
-    text: 'Formato Agent Skills (pasta com SKILL.md): o modelo descobre e carrega sob demanda, sem inflar o contexto.'
+    text: 'Formato Agent Skills (pasta com SKILL.md): carregadas sob demanda, sem inflar o contexto.'
   },
   {
     icon: <Eye className="size-5" />,
     title: 'Transparência total',
-    text: '"Ver request" mostra o body exato enviado. Custo, tokens e cache em cada resposta.'
+    text: '"Ver request" mostra o body exato enviado. Custo, tokens e cache em cada resposta.',
+    wide: true
   },
   {
-    icon: <LockKeyhole className="size-5" />,
+    icon: <UserRound className="size-5" />,
+    title: 'Personas',
+    text: 'Prompt, modelo, memórias e voz por persona. Troque de especialista em um clique.'
+  },
+  {
+    icon: <Globe className="size-5" />,
+    title: 'Pesquisa na web',
+    text: 'DuckDuckGo, Brave, Exa e Tavily, com ordem e fallback configuráveis.'
+  },
+  {
+    icon: <ShieldCheck className="size-5" />,
     title: 'Sync ponta a ponta',
-    text: 'Conversas, provedores e memórias sincronizados entre dispositivos — cifrados antes de sair deles.'
+    text: 'Conversas, provedores e memórias em todos os dispositivos — cifrados antes de sair deles.'
   },
   {
     icon: <Server className="size-5" />,
@@ -94,36 +181,88 @@ const FEATURES: { icon: ReactNode; title: string; text: string }[] = [
   }
 ]
 
-const SHOTS = [
+const SHOTS: { src: string; title: string; text: string; group: 'Voz' | 'Agente' }[] = [
+  {
+    src: shotCall,
+    group: 'Voz',
+    title: 'Chamada de voz',
+    text: 'O agente roda o terminal enquanto vocês conversam; a chamada fica marcada no chat.'
+  },
+  {
+    src: shotDictation,
+    group: 'Voz',
+    title: 'Ditado',
+    text: 'O texto aparece enquanto você fala, direto no campo de mensagem.'
+  },
+  {
+    src: shotVoiceSettings,
+    group: 'Voz',
+    title: 'Vozes e parâmetros',
+    text: 'ElevenLabs por WebSocket, formato de saída e voice settings — tudo exposto.'
+  },
+  {
+    src: shotGpu,
+    group: 'Voz',
+    title: 'Modelos locais na GPU',
+    text: 'Checagem do hardware, motores sob demanda e o servidor local que se desliga sozinho.'
+  },
+  {
+    src: shotPersona,
+    group: 'Voz',
+    title: 'Voz por persona',
+    text: 'Modelo da chamada, prompt complementar e se o agente pode desligar.'
+  },
+  {
+    src: shotChat,
+    group: 'Agente',
+    title: 'Chat com agente',
+    text: 'Shell aguardando aprovação, comando a comando.'
+  },
   {
     src: shotQueue,
+    group: 'Agente',
     title: 'Fila de aprovações',
     text: 'Vários subagentes pedindo ao mesmo tempo: "1 de 3", um de cada vez.'
   },
   {
     src: shotAsk,
+    group: 'Agente',
     title: 'Questionário do agente',
     text: 'O agente pergunta com opções, ícones e imagens — sempre há "Outro".'
   },
   {
     src: shotLists,
+    group: 'Agente',
     title: 'Whitelist e blacklist',
     text: 'Teste um comando e veja o veredito de cada sub-comando de `a && b | c`.'
   },
   {
     src: shotMemory,
+    group: 'Agente',
     title: 'Memória',
     text: 'Ferramentas de busca e gravação no chat e o painel de coleções.'
-  },
-  {
-    src: shotMarkdown,
-    title: 'Markdown de verdade',
-    text: 'LaTeX, blocos de código aninhados e streaming.'
   }
 ]
 
+/** `trechos entre crases` viram <code>. */
+function withCode(text: string): ReactNode {
+  return text.split(/`([^`]+)`/).map((part, i) =>
+    i % 2 ? (
+      <code
+        key={i}
+        className="rounded border border-border bg-elevated px-1 py-px font-mono text-[0.88em] text-[#e9d5ff]"
+      >
+        {part}
+      </code>
+    ) : (
+      part
+    )
+  )
+}
+
 function Section({
   id,
+  index,
   eyebrow,
   title,
   intro,
@@ -131,6 +270,7 @@ function Section({
   className
 }: {
   id?: string
+  index: string
   eyebrow: string
   title: ReactNode
   intro?: ReactNode
@@ -138,20 +278,31 @@ function Section({
   className?: string
 }) {
   return (
-    <section id={id} className={cx('scroll-mt-20 px-4 py-16 sm:px-8 sm:py-24', className)}>
+    <section id={id} className={cx('relative scroll-mt-16 px-4 py-20 sm:px-8 sm:py-28', className)}>
       <div className="mx-auto max-w-6xl">
-        <p className="text-[13px] font-medium tracking-wide text-accent-strong uppercase">
+        <p
+          data-reveal
+          className="flex items-center gap-3 font-mono text-[12px] tracking-[0.18em] text-accent-strong uppercase"
+        >
+          <span className="text-faint">{index}</span>
+          <span className="h-px w-8 bg-accent/50" />
           {eyebrow}
         </p>
-        <h2 className="mt-2 max-w-3xl text-[26px] leading-tight font-semibold tracking-tight sm:text-[34px]">
+        <h2
+          data-reveal
+          className="mt-4 max-w-3xl text-[30px] leading-[1.08] font-semibold tracking-[-0.03em] text-balance sm:text-[46px]"
+        >
           {title}
         </h2>
         {intro && (
-          <p className="mt-4 max-w-2xl text-[15px] leading-relaxed text-muted sm:text-base">
+          <p
+            data-reveal
+            className="mt-5 max-w-2xl text-[15.5px] leading-relaxed text-muted sm:text-[17px]"
+          >
             {intro}
           </p>
         )}
-        <div className="mt-10 sm:mt-12">{children}</div>
+        <div className="mt-12 sm:mt-16">{children}</div>
       </div>
     </section>
   )
@@ -208,20 +359,27 @@ function primaryAsset(os: OS, r: Release | null): Asset | undefined {
 function DownloadCta({
   os,
   release,
-  downloadUrl
+  downloadUrl,
+  center
 }: {
   os: OS
   release: Release | null
   downloadUrl: string
+  center?: boolean
 }) {
   const desktop = os === 'windows' || os === 'mac' || os === 'linux'
   const asset = primaryAsset(os, release)
   const href = asset?.url ?? release?.pageUrl ?? downloadUrl
   return (
-    <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center lg:justify-start">
+    <div
+      className={cx(
+        'flex flex-col items-center gap-3 sm:flex-row sm:justify-center',
+        !center && 'lg:justify-start'
+      )}
+    >
       <a
         href={desktop ? href : '#download'}
-        className="w-full sm:w-auto"
+        className="glow-ring w-full rounded-lg sm:w-auto"
         {...(desktop ? { rel: 'noopener' } : {})}
       >
         <Button
@@ -234,7 +392,11 @@ function DownloadCta({
         </Button>
       </a>
       <a href="#download" className="w-full sm:w-auto">
-        <Button size="lg" variant="secondary" className="w-full sm:w-auto">
+        <Button
+          size="lg"
+          variant="secondary"
+          className="w-full bg-elevated/60 backdrop-blur sm:w-auto"
+        >
           Todas as plataformas
         </Button>
       </a>
@@ -255,7 +417,7 @@ function AssetLink({ asset, label, fallback }: { asset?: Asset; label: string; f
           {asset ? `${asset.name} · ${formatBytes(asset.size)}` : 'na página de releases'}
         </span>
       </span>
-      <Download className="size-4 shrink-0 text-subtle group-hover:text-accent-strong" />
+      <Download className="size-4 shrink-0 text-subtle transition-transform group-hover:translate-y-0.5 group-hover:text-accent-strong" />
     </a>
   )
 }
@@ -307,11 +469,13 @@ function Downloads({
         </p>
       )}
       <div className="grid gap-4 md:grid-cols-3 [&>*]:min-w-0">
-        {cards.map((c) => (
-          <div
+        {cards.map((c, k) => (
+          <SpotCard
             key={c.os}
+            data-reveal
+            style={{ transitionDelay: `${k * 70}ms` }}
             className={cx(
-              'rounded-2xl border bg-surface p-5',
+              'rounded-2xl border bg-surface/80 p-5 backdrop-blur',
               os === c.os
                 ? 'border-accent/40 shadow-[0_0_0_1px_rgb(139_92_246/0.15),0_20px_60px_-30px_rgb(139_92_246/0.6)]'
                 : 'border-border'
@@ -333,7 +497,7 @@ function Downloads({
                 <AssetLink key={l.label} label={l.label} asset={l.asset} fallback={page} />
               ))}
             </div>
-          </div>
+          </SpotCard>
         ))}
       </div>
       <p className="mt-6 text-center text-[13px] text-subtle">
@@ -372,10 +536,15 @@ export default function Landing() {
   const [os] = useState<OS>(() => detectOS())
   const [shot, setShot] = useState(0)
   const [menu, setMenu] = useState(false)
+  const [scrolled, setScrolled] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const heroRef = useRef<HTMLElement>(null)
+  const amp = useRef(0)
   const downloadUrl = info?.links.download || DEFAULT_RELEASES
   const name = info?.name ?? 'ClearChat'
   const signupOpen = !!info?.features.signupOpen
   const loggedIn = phase === 'locked' || phase === 'unlocked' || phase === 'needs_setup'
+  useReveal(rootRef)
 
   useEffect(() => {
     let alive = true
@@ -394,11 +563,20 @@ export default function Landing() {
   useEffect(() => {
     document.title =
       name === 'ClearChat'
-        ? 'ClearChat — chat com IA, agentes e controle total'
+        ? 'ClearChat — chat com IA, agentes, voz e controle total'
         : `${name} · ClearChat`
   }, [name])
 
+  // cabeçalho transparente sobre o hero, vidro fosco depois de rolar
+  useEffect(() => {
+    const on = () => setScrolled(window.scrollY > 12)
+    on()
+    window.addEventListener('scroll', on, { passive: true })
+    return () => window.removeEventListener('scroll', on)
+  }, [])
+
   const nav = [
+    { href: '#voz', label: 'Voz' },
     { href: '#recursos', label: 'Recursos' },
     { href: '#sync', label: 'Sincronização' },
     { href: '#download', label: 'Download' },
@@ -428,9 +606,22 @@ export default function Landing() {
   )
 
   return (
-    <div className="min-h-dvh overflow-x-hidden" data-page-root onClick={onAnchorClick}>
+    <div
+      ref={rootRef}
+      className="landing min-h-dvh overflow-x-clip"
+      data-page-root
+      onClick={onAnchorClick}
+    >
+      <CursorGlow />
       {/* ---------------- cabeçalho ---------------- */}
-      <header className="sticky top-0 z-40 border-b border-border/60 bg-bg/80 backdrop-blur-md">
+      <header
+        className={cx(
+          'sticky top-0 z-40 border-b transition-colors duration-300',
+          scrolled || menu
+            ? 'border-border/60 bg-bg/70 backdrop-blur-xl'
+            : 'border-transparent bg-transparent'
+        )}
+      >
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-8">
           <a href="#topo" className="rounded-lg" aria-label={name}>
             <Wordmark name={name} />
@@ -440,7 +631,7 @@ export default function Landing() {
               <a
                 key={n.href}
                 href={n.href}
-                className="rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-hover hover:text-fg"
+                className="rounded-lg px-3 py-1.5 text-sm text-muted transition-colors hover:bg-hover/70 hover:text-fg"
               >
                 {n.label}
               </a>
@@ -458,7 +649,7 @@ export default function Landing() {
             {authButtons}
           </div>
           <button
-            className="rounded-lg border border-border p-2 text-muted md:hidden"
+            className="rounded-lg border border-border bg-bg/50 p-2 text-muted backdrop-blur md:hidden"
             onClick={() => setMenu((m) => !m)}
             aria-label="Menu"
             aria-expanded={menu}
@@ -495,99 +686,234 @@ export default function Landing() {
       </header>
 
       {/* ---------------- hero ---------------- */}
-      <section id="topo" className="glow relative px-4 pt-14 pb-16 sm:px-8 sm:pt-20 sm:pb-24">
-        <div className="mx-auto grid max-w-6xl items-center gap-12 lg:grid-cols-[1fr_1.15fr] [&>*]:min-w-0">
+      <section
+        id="topo"
+        ref={heroRef}
+        className="relative isolate -mt-[57px] flex min-h-[100svh] items-center overflow-hidden px-4 pt-[400px] pb-16 sm:px-8 lg:pt-24 lg:pb-20"
+      >
+        <div aria-hidden className="hero-grid absolute inset-0 -z-20" />
+        <Orb amp={amp} host={heroRef} className="absolute inset-0 -z-10 size-full" />
+        <div aria-hidden className="hero-fade absolute inset-x-0 bottom-0 -z-10 h-40" />
+        <div className="mx-auto grid w-full max-w-6xl items-end gap-10 lg:grid-cols-[1.08fr_1fr] lg:items-center [&>*]:min-w-0">
           <div className="text-center lg:text-left">
             <a
-              href={REPO_URL}
-              rel="noopener"
-              className="inline-flex items-center gap-2 rounded-full border border-border bg-surface/70 px-3 py-1 text-[12.5px] text-muted hover:text-fg"
+              href="#voz"
+              className="hero-in group inline-flex items-center gap-2 rounded-full border border-accent/30 bg-bg/60 py-1 pr-3 pl-1 text-[12.5px] text-muted backdrop-blur hover:border-accent/60 hover:text-fg"
             >
-              <span className="size-1.5 rounded-full bg-success" /> Código aberto · Windows, macOS e
-              Linux
+              <span className="rounded-full bg-accent px-2 py-0.5 text-[11px] font-semibold text-white">
+                Novo
+              </span>
+              Chamadas de voz com o seu agente
+              <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
             </a>
-            <h1 className="mt-6 text-[36px] text-balance leading-[1.08] font-semibold tracking-[-0.025em] sm:text-[52px]">
-              O chat com IA que{' '}
-              <span className="bg-gradient-to-r from-[#c4b5fd] via-accent-strong to-[#7c5cf0] bg-clip-text text-transparent">
-                mostra tudo
-              </span>{' '}
-              o que faz.
+            <h1 className="hero-in mt-6 text-[40px] leading-[1.02] font-semibold tracking-[-0.04em] text-balance [animation-delay:80ms] sm:text-[60px] lg:text-[64px]">
+              O chat com IA que <span className="text-shimmer">mostra tudo</span> o que faz.
             </h1>
-            <p className="mx-auto mt-5 max-w-xl text-[16px] leading-relaxed text-muted sm:text-[17px] lg:mx-0">
-              ClearChat é um app desktop minimalista para conversar com qualquer modelo — com
-              agentes, ferramentas sob a sua aprovação, subagentes, memória e skills. Você vê
-              exatamente o que vai para a API.
+            <p className="hero-in mx-auto mt-6 max-w-xl text-[16px] leading-relaxed text-muted [animation-delay:160ms] sm:text-[18px] lg:mx-0">
+              Agentes com ferramentas sob a sua aprovação, subagentes, memória, skills — e agora
+              voz: ligue para o seu agente e interrompa quando quiser. Qualquer provedor, ou tudo
+              local. Você vê cada byte que vai para a API.
             </p>
-            <div className="mt-8">
+            <div className="hero-in mt-9 [animation-delay:240ms]">
               <DownloadCta os={os} release={release} downloadUrl={downloadUrl} />
             </div>
-            <p className="mt-4 text-[12.5px] text-subtle">
-              {release?.version ? `Versão ${release.version} · ` : ''}grátis · sem conta obrigatória
+            <p className="hero-in mt-4 text-[12.5px] text-subtle [animation-delay:300ms]">
+              {release?.version ? `Versão ${release.version} · ` : ''}grátis · código aberto · sem
+              conta obrigatória
             </p>
           </div>
-          <div className="relative">
-            <div
-              aria-hidden
-              className="pointer-events-none absolute -inset-8 -z-10 rounded-[40px] bg-accent/10 blur-3xl"
-            />
-            <WindowFrame
-              src={shotChat}
-              alt="Chat com agente: ferramenta de shell aguardando aprovação comando a comando"
-              eager
-            />
+          <div className="hero-in flex flex-col items-center gap-4 [animation-delay:420ms] lg:items-end lg:self-end lg:pt-[44vh]">
+            <CallTicker amp={amp} />
+            <p className="hidden items-center gap-1.5 font-mono text-[11px] text-faint lg:flex">
+              <MousePointer2 className="size-3" /> mova o mouse · clique na esfera
+            </p>
           </div>
         </div>
       </section>
 
-      {/* ---------------- recursos ---------------- */}
+      {/* ---------------- letreiro ---------------- */}
+      <div className="border-y border-border/50 bg-surface/30 py-5 backdrop-blur">
+        <Marquee items={STACK} className="font-mono text-[13px] text-subtle" />
+      </div>
+
+      {/* ---------------- voz ---------------- */}
+      <Section
+        id="voz"
+        index="01"
+        eyebrow="Voz"
+        title={
+          <>
+            Ligue para o seu agente. <span className="text-muted">Ele atende.</span>
+          </>
+        }
+        intro="Uma conversa de verdade, não um walkie-talkie: a transcrição começa enquanto você fala, a voz sai antes da resposta terminar e você pode interromper a qualquer momento — com as mesmas ferramentas e aprovações do chat."
+      >
+        <div className="grid items-start gap-8 lg:grid-cols-[1.05fr_1fr] [&>*]:min-w-0">
+          <div data-reveal>
+            <VoiceLab />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {VOICE.map((v, k) => (
+              <SpotCard
+                key={v.title}
+                data-reveal
+                style={{ transitionDelay: `${k * 60}ms` }}
+                className="rounded-2xl border border-border bg-surface/70 p-4 backdrop-blur"
+              >
+                <div className="flex size-8 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
+                  {v.icon}
+                </div>
+                <h3 className="mt-3 text-[14.5px] font-semibold">{v.title}</h3>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">{v.text}</p>
+              </SpotCard>
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      {/* ---------------- recursos / aprovações ---------------- */}
       <Section
         id="recursos"
-        eyebrow="Recursos"
+        index="02"
+        eyebrow="Agente"
         title="Um agente de verdade, sem perder o controle."
-        intro="Tudo o que o modelo faz passa por você: cada ferramenta tem uma política, cada request pode ser inspecionada, e nada sai do seu computador sem você saber."
+        intro="Tudo o que o modelo faz passa por você: cada ferramenta tem uma política, e cada pedaço de um comando composto é julgado separadamente. Experimente — às vezes é você quem decide."
+        className="section-glow"
       >
-        <div className="grid gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
-          {FEATURES.map((f) => (
-            <div key={f.title} className="bg-surface p-5 sm:p-6">
+        <div className="grid items-stretch gap-8 lg:grid-cols-[1.15fr_1fr] [&>*]:min-w-0">
+          <div data-reveal className="min-h-[420px]">
+            <ApprovalDemo />
+          </div>
+          <ul className="flex flex-col justify-center gap-6">
+            {[
+              {
+                icon: <ShieldCheck className="size-4" />,
+                title: 'Uma política por ferramenta',
+                text: 'Comandos, processos, páginas, busca, escrita de arquivos, delegação: sempre permitir, perguntar, listas ou Smart-Approve.'
+              },
+              {
+                icon: <Sparkles className="size-4" />,
+                title: 'Smart-Approve',
+                text: 'Um modelo juiz lê o contexto e libera o que é seguro. Na dúvida, ele pergunta para você.'
+              },
+              {
+                icon: <Terminal className="size-4" />,
+                title: 'Cada sub-comando conta',
+                text: 'Em `a && b | c`, whitelist e blacklist valem para cada parte — um `| sh` escondido não passa.'
+              }
+            ].map((p, k) => (
+              <li
+                key={p.title}
+                data-reveal
+                style={{ transitionDelay: `${k * 80}ms` }}
+                className="flex gap-4"
+              >
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-elevated text-accent-strong">
+                  {p.icon}
+                </div>
+                <div>
+                  <h3 className="text-[15.5px] font-semibold">{p.title}</h3>
+                  <p className="mt-1 text-[14px] leading-relaxed text-muted">{withCode(p.text)}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="mt-20 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {FEATURES.map((f, k) => (
+            <SpotCard
+              key={f.title}
+              data-reveal
+              style={{ transitionDelay: `${(k % 4) * 60}ms` }}
+              className={cx(
+                'rounded-2xl border border-border bg-surface/70 p-5 backdrop-blur sm:p-6',
+                f.wide && 'lg:col-span-2'
+              )}
+            >
               <div className="flex size-9 items-center justify-center rounded-lg bg-accent-soft text-accent-strong">
                 {f.icon}
               </div>
               <h3 className="mt-4 text-[15px] font-semibold">{f.title}</h3>
               <p className="mt-1.5 text-[13.5px] leading-relaxed text-muted">{f.text}</p>
-            </div>
+            </SpotCard>
           ))}
         </div>
+      </Section>
 
-        <div className="mt-14 grid items-start gap-8 lg:grid-cols-[18rem_1fr] [&>*]:min-w-0">
+      {/* ---------------- transparência ---------------- */}
+      <Section
+        id="transparencia"
+        index="03"
+        eyebrow="Transparência"
+        title={
+          <>
+            Nada de caixa-preta. <span className="text-muted">Veja o body exato.</span>
+          </>
+        }
+        intro="Passe o mouse em cada pedaço do chat e veja no que ele vira na request — persona, memória, ferramentas, parâmetros. Custo, tokens e cache em cada resposta."
+      >
+        <div data-reveal>
+          <RequestInspector />
+        </div>
+      </Section>
+
+      {/* ---------------- galeria ---------------- */}
+      <Section
+        id="galeria"
+        index="04"
+        eyebrow="Por dentro"
+        title="Minimalista por fora. Completo por dentro."
+        className="section-glow"
+      >
+        <div className="grid items-start gap-8 lg:grid-cols-[17rem_1fr] [&>*]:min-w-0">
           <div
-            className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible"
+            className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 lg:mx-0 lg:flex-col lg:overflow-visible lg:px-0"
             role="tablist"
             aria-label="Capturas de tela"
           >
-            {SHOTS.map((s, i) => (
+            {SHOTS.map((s, i) => [
+              (i === 0 || SHOTS[i - 1].group !== s.group) && (
+                <span
+                  key={`g${s.group}`}
+                  className={cx(
+                    'hidden font-mono text-[11px] tracking-[0.16em] text-faint uppercase lg:block',
+                    i > 0 && 'mt-3'
+                  )}
+                >
+                  {s.group}
+                </span>
+              ),
               <button
                 key={s.title}
                 role="tab"
                 aria-selected={shot === i}
                 onClick={() => setShot(i)}
                 className={cx(
-                  'shrink-0 rounded-xl border px-4 py-3 text-left transition-colors lg:shrink',
+                  'relative shrink-0 rounded-xl border px-4 py-2.5 text-left transition-all lg:shrink',
                   shot === i
-                    ? 'border-accent/40 bg-accent-soft'
-                    : 'border-border bg-surface hover:bg-hover'
+                    ? 'border-accent/40 bg-accent-soft shadow-[0_0_30px_-12px_rgb(139_92_246/0.8)]'
+                    : 'border-border bg-surface/70 hover:bg-hover'
                 )}
               >
                 <span className="block text-sm font-medium whitespace-nowrap lg:whitespace-normal">
                   {s.title}
                 </span>
                 <span className="mt-0.5 hidden text-[12.5px] leading-relaxed text-subtle lg:block">
-                  {s.text}
+                  {withCode(s.text)}
                 </span>
               </button>
-            ))}
+            ])}
           </div>
-          <div>
-            <WindowFrame src={SHOTS[shot].src} alt={`${SHOTS[shot].title}: ${SHOTS[shot].text}`} />
+          <div data-reveal>
+            <Tilt>
+              <WindowFrame
+                key={shot}
+                className="animate-fade-in"
+                src={SHOTS[shot].src}
+                alt={`${SHOTS[shot].title}: ${SHOTS[shot].text}`}
+              />
+            </Tilt>
             <p className="mt-3 text-center text-[13px] text-subtle lg:hidden">{SHOTS[shot].text}</p>
           </div>
         </div>
@@ -596,102 +922,70 @@ export default function Landing() {
       {/* ---------------- sync ---------------- */}
       <Section
         id="sync"
+        index="05"
         eyebrow="Sincronização"
         title="Seus chats em todos os dispositivos. Legíveis só para você."
-        intro={`Com uma conta em ${name}, conversas, provedores, personas e memórias sincronizam entre os seus computadores — cifrados ponta a ponta antes de sair de cada um.`}
-        className="border-y border-border/60 bg-surface/30"
+        intro={`Com uma conta em ${name}, conversas, provedores, personas e memórias sincronizam entre os seus computadores — cifrados ponta a ponta antes de sair de cada um. Digite abaixo: a cifragem é real, feita agora no seu navegador.`}
       >
-        <div className="grid gap-10 lg:grid-cols-2 [&>*]:min-w-0">
-          <ul className="space-y-5">
-            {[
-              {
-                icon: <KeyRound className="size-4" />,
-                title: 'A senha nunca sai do dispositivo',
-                text: 'Ela deriva a chave (Argon2id) que abre os seus dados. O servidor guarda só envelopes cifrados com AES-256-GCM.'
-              },
-              {
-                icon: <ShieldCheck className="size-4" />,
-                title: 'Chave de recuperação',
-                text: 'Gerada no seu navegador no cadastro e mostrada uma única vez. Sem ela e sem a senha, nem o servidor consegue ler nada.'
-              },
-              {
-                icon: <Terminal className="size-4" />,
-                title: 'O chat roda onde as ferramentas estão',
-                text: 'Cada conversa executa num dispositivo (o host, onde o shell e os arquivos agem). Os outros assistem ao vivo e enviam comandos.'
-              },
-              {
-                icon: <Laptop className="size-4" />,
-                title: 'Login sem senha',
-                text: 'Entrar é por código no e-mail; desbloquear os dados é com a sua senha. Cada dispositivo pode ser desconectado a qualquer momento.'
-              }
-            ].map((p) => (
-              <li key={p.title} className="flex gap-4">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-elevated text-accent-strong">
-                  {p.icon}
-                </div>
-                <div>
-                  <h3 className="text-[15px] font-semibold">{p.title}</h3>
-                  <p className="mt-1 text-[14px] leading-relaxed text-muted">{p.text}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-          <div className="rounded-2xl border border-border bg-bg/60 p-5 sm:p-7">
-            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center text-[12.5px]">
-              <div className="rounded-xl border border-border bg-surface px-2 py-4">
-                <Laptop className="mx-auto mb-2 size-5 text-muted" />
-                PC de casa
-                <p className="mt-1 font-mono text-[11px] text-success">texto claro</p>
-              </div>
-              <ArrowRight className="size-4 text-subtle" />
-              <div className="rounded-xl border border-accent/30 bg-accent-soft px-2 py-4">
-                <Server className="mx-auto mb-2 size-5 text-accent-strong" />
-                Servidor
-                <p className="mt-1 font-mono text-[11px] text-accent-strong">só cifrado</p>
-              </div>
-            </div>
-            <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-center text-[12.5px]">
-              <div />
-              <ArrowRight className="size-4 rotate-90 text-subtle sm:rotate-[135deg]" />
-              <div className="rounded-xl border border-border bg-surface px-2 py-4">
-                <Laptop className="mx-auto mb-2 size-5 text-muted" />
-                Notebook
-                <p className="mt-1 font-mono text-[11px] text-success">texto claro</p>
-              </div>
-            </div>
-            <pre className="mt-6 overflow-x-auto rounded-xl border border-border bg-surface p-4 font-mono text-[11.5px] leading-relaxed text-subtle">
-              {`{ "type": "message", "rev": 3,
-  "env": { "v": 1, "k": 1,
-    "n": "VVVVVVVVVVVVVVVV",
-    "c": "A3VSbzes1Tl0k9GpgM6G8lHRbAnRp…" } }`}
-            </pre>
-            <p className="mt-2 text-center text-[12px] text-faint">
-              o que o servidor guarda de uma mensagem
-            </p>
-            {!loggedIn && (
-              <div className="mt-6 flex flex-col gap-2 sm:flex-row">
-                {signupOpen && (
-                  <Link to="/signup" className="flex-1">
-                    <Button variant="primary" className="w-full">
-                      Criar conta grátis
-                    </Button>
-                  </Link>
-                )}
-                <Link to="/login" className="flex-1">
-                  <Button className="w-full">Entrar</Button>
-                </Link>
-              </div>
-            )}
-          </div>
+        <div data-reveal>
+          <CryptoPlayground />
         </div>
+        <ul className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            {
+              icon: <KeyRound className="size-4" />,
+              title: 'A senha nunca sai do dispositivo',
+              text: 'Ela deriva a chave (Argon2id) que abre os seus dados. O servidor guarda só envelopes AES-256-GCM.'
+            },
+            {
+              icon: <ShieldCheck className="size-4" />,
+              title: 'Chave de recuperação',
+              text: 'Gerada no seu navegador e mostrada uma única vez. Sem ela e sem a senha, ninguém lê nada.'
+            },
+            {
+              icon: <Terminal className="size-4" />,
+              title: 'O chat roda onde as ferramentas estão',
+              text: 'Cada conversa executa num dispositivo; os outros assistem ao vivo e enviam comandos.'
+            },
+            {
+              icon: <Zap className="size-4" />,
+              title: 'Login sem senha',
+              text: 'Entrar é por código no e-mail; desbloquear é com a sua senha. Desconecte dispositivos quando quiser.'
+            }
+          ].map((p, k) => (
+            <li key={p.title} data-reveal style={{ transitionDelay: `${k * 70}ms` }}>
+              <div className="flex size-9 items-center justify-center rounded-lg border border-border bg-elevated text-accent-strong">
+                {p.icon}
+              </div>
+              <h3 className="mt-3 text-[15px] font-semibold">{p.title}</h3>
+              <p className="mt-1 text-[13.5px] leading-relaxed text-muted">{p.text}</p>
+            </li>
+          ))}
+        </ul>
+        {!loggedIn && (
+          <div className="mt-10 flex flex-col justify-center gap-2 sm:flex-row" data-reveal>
+            {signupOpen && (
+              <Link to="/signup">
+                <Button variant="primary" className="w-full sm:w-auto">
+                  Criar conta grátis
+                </Button>
+              </Link>
+            )}
+            <Link to="/login">
+              <Button className="w-full sm:w-auto">Entrar</Button>
+            </Link>
+          </div>
+        )}
       </Section>
 
       {/* ---------------- download ---------------- */}
       <Section
         id="download"
+        index="06"
         eyebrow="Download"
         title="Baixe o ClearChat."
         intro="Funciona sozinho, sem conta. A sincronização é opcional e pode ser ligada depois nas configurações."
+        className="section-glow"
       >
         <Downloads release={release} downloadUrl={downloadUrl} os={os} />
       </Section>
@@ -699,14 +993,14 @@ export default function Landing() {
       {/* ---------------- self-host ---------------- */}
       <Section
         id="self-host"
+        index="07"
         eyebrow="Self-host"
         title="Prefere o seu próprio servidor?"
         intro="O servidor de sync é código aberto e roda em qualquer máquina com Docker — inclusive na sua rede local, com ou sem domínio. No app: Configurações → Conta → Servidor → Self-host."
-        className="border-t border-border/60 bg-surface/30"
       >
         <div className="grid gap-8 lg:grid-cols-[1.2fr_1fr] [&>*]:min-w-0">
-          <div className="overflow-hidden rounded-2xl border border-border bg-bg">
-            <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+          <div data-reveal className="glass overflow-hidden rounded-2xl">
+            <div className="flex items-center justify-between border-b border-border/70 px-4 py-2.5">
               <span className="font-mono text-[12px] text-subtle">terminal</span>
               <CopyButton
                 text={`git clone ${SERVER_REPO_URL}.git && cd ClearChatWebsite\ncp .env.example .env   # PUBLIC_BASE_URL, segredos, SMTP\ndocker compose --profile edge up -d --build`}
@@ -714,14 +1008,17 @@ export default function Landing() {
               />
             </div>
             <pre className="overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-muted">
-              <span className="text-subtle">$ </span>git clone {SERVER_REPO_URL}.git{'\n'}
-              <span className="text-subtle">$ </span>cd ClearChatWebsite && cp .env.example .env
+              <span className="text-accent-strong">$ </span>git clone {SERVER_REPO_URL}.git{'\n'}
+              <span className="text-accent-strong">$ </span>cd ClearChatWebsite && cp .env.example
+              .env
               {'\n'}
               <span className="text-faint">
                 # PUBLIC_BASE_URL, segredos, SMTP (captcha é opcional)
               </span>
               {'\n'}
-              <span className="text-subtle">$ </span>docker compose --profile edge up -d --build
+              <span className="text-accent-strong">$ </span>docker compose --profile edge up -d
+              --build
+              <span className="caret" aria-hidden />
             </pre>
           </div>
           <ul className="space-y-3 text-[14px] text-muted">
@@ -730,13 +1027,18 @@ export default function Landing() {
               'Postgres + API FastAPI + este site, com painel admin só em 127.0.0.1.',
               'Cadastro fechado com convites, cotas por usuário e captcha opcional.',
               'Funciona em sub-caminho (ex.: https://exemplo.com/clearchat).'
-            ].map((t) => (
-              <li key={t} className="flex gap-3">
+            ].map((t, k) => (
+              <li
+                key={t}
+                className="flex gap-3"
+                data-reveal
+                style={{ transitionDelay: `${k * 60}ms` }}
+              >
                 <Check className="mt-0.5 size-4 shrink-0 text-success" />
                 {t}
               </li>
             ))}
-            <li className="pt-2">
+            <li className="pt-2" data-reveal>
               <a
                 href={SERVER_REPO_URL}
                 rel="noopener"
@@ -748,6 +1050,26 @@ export default function Landing() {
           </ul>
         </div>
       </Section>
+
+      {/* ---------------- chamada final ---------------- */}
+      <section className="relative isolate overflow-hidden px-4 py-28 text-center sm:px-8 sm:py-36">
+        <div aria-hidden className="final-glow absolute inset-0 -z-10" />
+        <p
+          data-reveal
+          className="font-mono text-[12px] tracking-[0.18em] text-accent-strong uppercase"
+        >
+          Código aberto · Windows, macOS e Linux
+        </p>
+        <h2
+          data-reveal
+          className="mx-auto mt-5 max-w-3xl text-[36px] leading-[1.04] font-semibold tracking-[-0.04em] text-balance sm:text-[60px]"
+        >
+          A IA trabalha. <span className="text-shimmer">Você vê tudo.</span>
+        </h2>
+        <div data-reveal className="mt-10">
+          <DownloadCta os={os} release={release} downloadUrl={downloadUrl} center />
+        </div>
+      </section>
 
       {/* ---------------- rodapé ---------------- */}
       <footer className="border-t border-border px-4 py-10 sm:px-8">

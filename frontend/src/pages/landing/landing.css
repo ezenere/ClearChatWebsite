@@ -1,0 +1,402 @@
+/* Efeitos da landing (carregados só com a página). Cores dos tokens de src/index.css. */
+@property --cc-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.landing {
+  position: relative;
+}
+
+/* revelar ao rolar (useReveal marca data-in) */
+.landing [data-reveal] {
+  opacity: 0;
+  transform: translateY(22px);
+  filter: blur(6px);
+  transition:
+    opacity 0.8s cubic-bezier(0.2, 0.7, 0.2, 1),
+    transform 0.8s cubic-bezier(0.2, 0.7, 0.2, 1),
+    filter 0.8s cubic-bezier(0.2, 0.7, 0.2, 1),
+    border-color 0.3s;
+}
+.landing [data-reveal][data-in] {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+.hero-in {
+  animation: cc-rise 1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes cc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+.text-shimmer {
+  background: linear-gradient(
+    100deg,
+    #c4b5fd 0%,
+    #a78bfa 25%,
+    #67e8f9 45%,
+    #e9d5ff 55%,
+    #8b5cf6 75%,
+    #c4b5fd 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: cc-shimmer 7s ease-in-out infinite alternate;
+}
+@keyframes cc-shimmer {
+  to {
+    background-position: 100% 0;
+  }
+}
+
+.glass {
+  background: linear-gradient(180deg, rgb(24 24 32 / 0.72), rgb(14 14 19 / 0.62));
+  border: 1px solid rgb(255 255 255 / 0.07);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 24px 60px -30px rgb(0 0 0 / 0.8);
+}
+
+/* holofote: brilho e borda acesa seguindo o cursor (--sx/--sy) */
+.spot {
+  position: relative;
+  isolation: isolate;
+}
+.spot::before,
+.spot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s;
+}
+.spot::before {
+  z-index: -1;
+  background: radial-gradient(
+    380px circle at var(--sx, 50%) var(--sy, 50%),
+    rgb(139 92 246 / 0.13),
+    transparent 60%
+  );
+}
+.spot::after {
+  padding: 1px;
+  background: radial-gradient(
+    260px circle at var(--sx, 50%) var(--sy, 50%),
+    rgb(196 181 253 / 0.75),
+    transparent 60%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.spot:hover::before,
+.spot:hover::after {
+  opacity: 1;
+}
+
+/* inclinação 3D (Tilt) */
+.tilt-wrap {
+  perspective: 1400px;
+}
+.tilt {
+  position: relative;
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+  will-change: transform;
+}
+.tilt[data-tilting] {
+  transition: transform 0.1s linear;
+}
+.tilt-glare {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+  background: radial-gradient(
+    circle at var(--gx, 50%) var(--gy, 0%),
+    rgb(255 255 255 / 0.1),
+    transparent 45%
+  );
+}
+.tilt[data-tilting] .tilt-glare {
+  opacity: 1;
+}
+
+/* letreiro */
+.marquee {
+  display: flex;
+  gap: 2.5rem;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+}
+.marquee-row {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2.5rem;
+  min-width: 100%;
+  justify-content: space-around;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  white-space: nowrap;
+  animation: cc-marquee 45s linear infinite;
+}
+.marquee:hover .marquee-row {
+  animation-play-state: paused;
+}
+@keyframes cc-marquee {
+  to {
+    transform: translateX(calc(-100% - 2.5rem));
+  }
+}
+
+.cursor-glow {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  width: 600px;
+  height: 600px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s;
+  background: radial-gradient(circle, rgb(139 92 246 / 0.09), transparent 62%);
+  mix-blend-mode: screen;
+}
+
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.18em;
+  background: var(--color-accent-strong);
+  animation: cc-blink 1s steps(1) infinite;
+}
+@keyframes cc-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.eq-bar {
+  height: 100%;
+  transform-origin: bottom;
+  transform: scaleY(0.18);
+  animation: cc-eq 0.7s ease-in-out infinite alternate;
+  transition: background-color 0.3s;
+}
+@keyframes cc-eq {
+  from {
+    transform: scaleY(0.15);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* feixe entre os dispositivos do sync: três pacotes correndo a cada cifragem */
+.beam {
+  position: relative;
+  align-self: center;
+  justify-self: center;
+  width: 2px;
+  height: 40px;
+  background: linear-gradient(transparent, rgb(139 92 246 / 0.55), transparent);
+}
+.beam span {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: #c4b5fd;
+  box-shadow: 0 0 12px 2px rgb(139 92 246 / 0.9);
+  opacity: 0;
+  animation: cc-beam-y 0.9s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.beam span:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.beam span:nth-child(3) {
+  animation-delay: 0.24s;
+}
+@keyframes cc-beam-y {
+  0% {
+    top: 0;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
+}
+@media (min-width: 1024px) {
+  .beam {
+    width: 56px;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgb(139 92 246 / 0.55), transparent);
+  }
+  .beam span {
+    top: 50%;
+    left: 0;
+    margin: -3px 0 0;
+    animation-name: cc-beam-x;
+  }
+}
+@keyframes cc-beam-x {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    left: 100%;
+    opacity: 0;
+  }
+}
+
+.hero-grid {
+  background:
+    radial-gradient(55% 55% at 72% 42%, rgb(139 92 246 / 0.17), transparent 70%),
+    radial-gradient(35% 40% at 12% 18%, rgb(56 189 248 / 0.07), transparent 70%);
+}
+.hero-grid::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgb(167 139 250 / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(167 139 250 / 0.07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 75% 65% at 60% 45%, #000 20%, transparent 75%);
+}
+.hero-fade {
+  background: linear-gradient(transparent, var(--color-bg));
+}
+.section-glow {
+  background: radial-gradient(70% 40% at 50% 0%, rgb(139 92 246 / 0.07), transparent 70%);
+}
+
+.final-glow {
+  background: radial-gradient(45% 55% at 50% 55%, rgb(139 92 246 / 0.22), transparent 70%);
+}
+.final-glow::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 55%;
+  width: min(900px, 140vw);
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: conic-gradient(
+    from var(--cc-angle),
+    transparent,
+    rgb(139 92 246 / 0.35),
+    rgb(103 232 249 / 0.18),
+    transparent 40%
+  );
+  filter: blur(70px);
+  opacity: 0.6;
+  animation: cc-spin 14s linear infinite;
+}
+
+/* botão principal com anel de luz girando */
+.glow-ring {
+  position: relative;
+  isolation: isolate;
+}
+.glow-ring::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  border-radius: 10px;
+  background: conic-gradient(from var(--cc-angle), #8b5cf6, #67e8f9, #c084fc, #8b5cf6);
+  filter: blur(10px);
+  opacity: 0.55;
+  animation: cc-spin 4s linear infinite;
+  transition: opacity 0.3s;
+}
+.glow-ring:hover::before {
+  opacity: 0.9;
+}
+@keyframes cc-spin {
+  to {
+    --cc-angle: 360deg;
+  }
+}
+
+.orb-fallback {
+  position: absolute;
+  right: 12%;
+  top: 50%;
+  width: min(44vh, 30vw);
+  aspect-ratio: 1;
+  translate: 0 -50%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%, rgb(216 204 255 / 0.9), transparent 35%),
+    radial-gradient(circle, #8b5cf6 0%, #3b1f9e 60%, transparent 72%);
+  filter: blur(2px);
+  box-shadow: 0 0 120px 20px rgb(139 92 246 / 0.35);
+}
+@media (max-width: 1023px) {
+  .orb-fallback {
+    right: auto;
+    left: 50%;
+    top: 90px;
+    width: 220px;
+    translate: -50% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-in,
+  .text-shimmer,
+  .marquee-row,
+  .glow-ring::before,
+  .final-glow::before,
+  .eq-bar,
+  .caret {
+    animation: none !important;
+  }
+  .landing [data-reveal] {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
