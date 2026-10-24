@@ -5,14 +5,27 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  Mic,
   Paperclip,
+  Phone,
+  PhoneOff,
   Scissors,
   Terminal,
+  Volume2,
   Wrench
 } from 'lucide-react'
 import type { SiblingInfo } from '../data/branches'
 import type { Entry } from '../data/repo'
 import type { ContentPart, MessagePlain, ToolCall } from '../data/schemas'
+import {
+  callMarkLabel,
+  callMarkTooltip,
+  isVoiceCallMarker,
+  readVoiceCallMark,
+  readVoiceMeta,
+  voiceMessageTitle,
+  type VoiceMessageMeta
+} from '../data/voice'
 import { formatDateTime } from '../lib/format'
 import { Markdown } from './Markdown'
 import { cx } from './ui'
@@ -142,6 +155,45 @@ function Attachments({ names }: { names: string[] }) {
   )
 }
 
+/** Ícone de voz no rodapé: microfone (fala do usuário / ditado) ou alto-falante (resposta falada). */
+function VoiceMark({ role, voice }: { role: string; voice: VoiceMessageMeta | null }) {
+  const title = voiceMessageTitle(role, voice)
+  if (!title) return null
+  const Icon = voice?.source === 'call' && role === 'assistant' ? Volume2 : Mic
+  return (
+    <span
+      role="img"
+      title={title}
+      aria-label={title}
+      data-testid="voice-mark"
+      className="inline-flex shrink-0 text-subtle"
+    >
+      <Icon className="size-3.5" />
+    </span>
+  )
+}
+
+/** Marcador de início/fim da chamada de voz (`meta.kind: 'voice-call'`): linha divisória. */
+function CallMarker({ meta, content }: { meta: MessagePlain['meta']; content: string }) {
+  const mark = readVoiceCallMark(meta.voiceCall)
+  const label = callMarkLabel(mark, content)
+  const Icon = mark?.phase === 'end' ? PhoneOff : Phone
+  return (
+    <div
+      data-testid="voice-call-marker"
+      title={callMarkTooltip(mark)}
+      className="flex items-center gap-3 py-1 text-[12px] text-subtle"
+    >
+      <span className="h-px flex-1 bg-border" aria-hidden />
+      <span className="inline-flex max-w-[85%] items-center gap-1.5 text-center">
+        <Icon className="size-3.5 shrink-0" aria-hidden />
+        <span className="[overflow-wrap:anywhere]">{label}</span>
+      </span>
+      <span className="h-px flex-1 bg-border" aria-hidden />
+    </div>
+  )
+}
+
 /** Controles de versão (‹ i/n ›) de um caminho: irmãos de cada mensagem e troca. */
 export interface BranchControls {
   info: (id: string) => SiblingInfo | null
@@ -257,6 +309,15 @@ export function MessageList({
           )
         if (consumed.has(change.id)) return switcher ? withSwitcherAbove(null) : null
         if (!m) return null
+        if (isVoiceCallMarker(meta))
+          return withSwitcherAbove(
+            <CallMarker
+              meta={meta}
+              content={partsText((m as { content?: string | ContentPart[] | null }).content).text}
+            />
+          )
+        const voice = readVoiceMeta(meta.voice)
+        const callVoice = voice?.source === 'call'
         if (meta.kind === 'compaction')
           return withSwitcherAbove(
             <Collapsible
@@ -296,10 +357,24 @@ export function MessageList({
                 )}
                 title={formatDateTime(plain.createdAt)}
               >
-                <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p>
+                <p
+                  className={cx(
+                    'whitespace-pre-wrap [overflow-wrap:anywhere]',
+                    callVoice && 'italic'
+                  )}
+                >
+                  {text}
+                </p>
                 <Attachments names={attachments} />
               </div>
-              {switcher}
+              {voice ? (
+                <div className="flex items-center gap-2">
+                  {switcher}
+                  <VoiceMark role="user" voice={voice} />
+                </div>
+              ) : (
+                switcher
+              )}
             </div>
           )
         }
@@ -314,7 +389,14 @@ export function MessageList({
                   </p>
                 </Collapsible>
               )}
-              {m.content && <Markdown text={m.content} />}
+              {m.content &&
+                (callVoice ? (
+                  <div className="italic">
+                    <Markdown text={m.content} />
+                  </div>
+                ) : (
+                  <Markdown text={m.content} />
+                ))}
               {(m.tool_calls ?? []).map((c: ToolCall) => (
                 <Collapsible
                   key={c.id}
@@ -338,9 +420,10 @@ export function MessageList({
                   </div>
                 </Collapsible>
               ))}
-              {(switcher || meta.model || usage) && (
+              {(switcher || meta.model || usage || voice) && (
                 <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                   {switcher}
+                  <VoiceMark role="assistant" voice={voice} />
                   {(meta.model || usage) && (
                     <p className="font-mono text-[11.5px] text-subtle">
                       {[

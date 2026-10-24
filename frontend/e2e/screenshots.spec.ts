@@ -117,7 +117,7 @@ for (const s of SIZES) {
         await page.getByRole('link', { name: label, exact: true }).click()
       }
       await go('Provedores')
-      await expect(page.getByTestId('provider-card')).toHaveCount(3)
+      await expect(page.getByTestId('provider-card')).toHaveCount(4)
       await shot(page, s.name, '13-painel-provedores')
       await page.getByRole('button', { name: 'Editar OpenRouter' }).click()
       await shot(page, s.name, '14-painel-provedor-editar', false)

@@ -1,6 +1,6 @@
 // Provedores (registros `provider`): listar, adicionar, editar (incl. chave de API) e apagar.
 import { useState, type FormEvent } from 'react'
-import { Eye, EyeOff, KeyRound, Pencil, Plus, Sparkles, Trash2, X } from 'lucide-react'
+import { AudioLines, Eye, EyeOff, KeyRound, Pencil, Plus, Sparkles, Trash2, X } from 'lucide-react'
 import { toast } from '../../components/toast'
 import {
   Alert,
@@ -16,10 +16,11 @@ import {
 } from '../../components/ui'
 import type { Entry } from '../../data/repo'
 import {
-  inferProviderKind,
+  isChatProviderKind,
   PROVIDER_KIND_DEFAULT_URL,
   PROVIDER_KIND_LABEL,
   PROVIDER_KINDS,
+  providerKindOf,
   type ProviderKind,
   type ProviderPlain
 } from '../../data/schemas'
@@ -49,7 +50,7 @@ const emptyDraft = (): Draft => ({
 function toDraft(p: ProviderPlain): Draft {
   return {
     name: p.name ?? '',
-    kind: p.kind ?? inferProviderKind(p.baseUrl),
+    kind: providerKindOf(p),
     baseUrl: p.baseUrl ?? '',
     apiKey: p.apiKey ?? '',
     headers: Object.entries(p.headers ?? {}).map(([k, v]) => ({ k, v: String(v) }))
@@ -111,7 +112,14 @@ function ProviderForm({
           />
         )}
       </Field>
-      <Field label="Tipo" hint="Define o adaptador usado pelo app.">
+      <Field
+        label="Tipo"
+        hint={
+          isChatProviderKind(d.kind)
+            ? 'Define o adaptador usado pelo app.'
+            : 'Provedor de voz (fala) — não aparece nos modelos de chat.'
+        }
+      >
         {(id) => (
           <select
             id={id}
@@ -251,7 +259,8 @@ function ProviderCard({
 }) {
   const [reveal, setReveal] = useState(false)
   const p = entry.plain
-  const kind = p.kind ?? inferProviderKind(p.baseUrl)
+  const kind = providerKindOf(p)
+  const voiceOnly = !isChatProviderKind(kind)
   return (
     <li
       className="rounded-2xl border border-border bg-surface p-4 sm:p-5"
@@ -262,8 +271,18 @@ function ProviderCard({
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate text-[15px] font-semibold">{p.name || 'Sem nome'}</h3>
             <Badge tone="accent">{PROVIDER_KIND_LABEL[kind]}</Badge>
+            {voiceOnly && (
+              <Badge tone="success">
+                <AudioLines className="size-3" aria-hidden /> Voz
+              </Badge>
+            )}
           </div>
           <p className="mt-1 truncate font-mono text-[12.5px] text-subtle">{p.baseUrl}</p>
+          {voiceOnly && (
+            <p className="mt-1 text-[12px] text-subtle">
+              Provedor de voz (fala) — não aparece nos modelos de chat.
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 gap-1">
           <Button
@@ -398,7 +417,8 @@ export default function Providers() {
         </div>
       ) : !list.length ? (
         <EmptyState icon={<Sparkles className="size-5" />} title="Nenhum provedor">
-          Adicione um provedor (OpenRouter, Anthropic ou qualquer endpoint OpenAI-compatible).
+          Adicione um provedor (OpenRouter, Anthropic, ElevenLabs para voz ou qualquer endpoint
+          OpenAI-compatible).
         </EmptyState>
       ) : (
         <ul className="grid gap-3 md:grid-cols-2">

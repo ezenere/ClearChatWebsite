@@ -9,6 +9,7 @@ import { toast } from '../../components/toast'
 import { Alert, Badge, Button, ConfirmDialog, EmptyState, Spinner, cx } from '../../components/ui'
 import { activePath, buildTree, siblingInfo, type BranchSel } from '../../data/branches'
 import { loadChat, messageNode, type SessionView } from '../../data/chats'
+import { isVoiceCallDisabled } from '../../data/voice'
 import { errorMessage } from '../../lib/errors'
 import { formatDateTime, relativeTime } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
@@ -145,6 +146,7 @@ export default function ChatView() {
           </h1>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-subtle">
             {model && <Badge className="font-mono">{model}</Badge>}
+            {isVoiceCallDisabled(chat.config) && <Badge>Chamada de voz: desligada</Badge>}
             <span title={formatDateTime(chat.updatedAt)}>
               atualizada {relativeTime(chat.updatedAt)}
             </span>

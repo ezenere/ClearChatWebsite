@@ -1,6 +1,6 @@
 # ClearChat Sync — Protocolo v1 (contrato)
 
-> **Versão do protocolo: 1.4.1** · status: contrato inicial (ainda sem implementação) · data: 2026-10-21
+> **Versão do protocolo: 1.5.0** · status: contrato inicial (ainda sem implementação) · data: 2026-10-23
 >
 > ⚠️ **AVISO — CONTRATO COMPARTILHADO ENTRE DOIS REPOSITÓRIOS**
 > Este arquivo existe, **idêntico**, em `ClearChat` (app Electron, cliente) e em `ClearChatWebsite`
@@ -352,16 +352,34 @@ Todo plaintext é um objeto JSON com `sv` (versão do esquema do tipo, hoje `1`)
 0.8.x (desde 1.4.0; antes, 0.7.x — os campos que entraram depois são todos opcionais/aditivos, ex.:
 `ChatConfig.acceptEditsInRoot`, `ChatConfig.capturedContext`, `SmartApproveConfig.canDeny`/`judgeWhitelisted`/
 `environment`/`capture`/`capturePrompts`/`thinkingTokens`/`cache` (os dois últimos desde 1.4.1), `ContextCaptureConfig.thinkingTokens`/`cache` (desde 1.4.1),
-`MessageMeta.autoTitle`/`presentFiles`/`reasoningMs`). Leitores DEVEM ignorar campos
+`MessageMeta.autoTitle`/`presentFiles`/`reasoningMs`; desde 1.5.0, tipos do app com o áudio (depois do 0.9.0):
+`ChatConfig.voice` (§4.3.6), `MessageMeta.voice`/`voiceCall` e `MessageMeta.kind: 'voice-call'` (§4.3.8),
+`VoiceCallConfig.endCall`/`promptMode`). Leitores DEVEM ignorar campos
 desconhecidos e DEVEM preservá-los ao regravar (merge por campo); escritores NÃO DEVEM enviar `undefined`.
 
 #### 4.3.1 `provider`
 
 ```ts
-{ sv: 1, name: string, kind?: 'openai' | 'openrouter' | 'anthropic' /* ProviderKind */, baseUrl: string,
-  apiKey: string, headers: Record<string, string>, createdAt: number }
+{ sv: 1, name: string, kind?: 'openai' | 'openrouter' | 'anthropic' | 'elevenlabs' /* ProviderKind */,
+  baseUrl: string, apiKey: string, headers: Record<string, string>, createdAt: number }
 ```
-Mapeia `providers(id, name, kind, base_url, api_key, headers_json, created_at)`.
+Mapeia `providers(id, name, kind, base_url, api_key, headers_json, created_at)`. `kind` ausente ou
+desconhecido → inferido pela `baseUrl` (`openrouter.ai` → `openrouter`, `api.anthropic.com` →
+`anthropic`, `elevenlabs.io` → `elevenlabs` (desde 1.5.0), resto → `openai`).
+
+**Capacidades por tipo (desde 1.5.0).** O tipo define o que o provedor serve: `openai` e `openrouter` →
+chat + fala (TTS) + transcrição (STT); `anthropic` → só chat; **`elevenlabs` → só voz** (ElevenLabs direta:
+TTS por REST `/v1/text-to-speech/…` e WebSocket; cabeçalho `xi-api-key`; URL padrão
+`https://api.elevenlabs.io`). Um provedor sem `chat` NÃO DEVE aparecer nos seletores de modelo de chat,
+nem ser usado como provedor de chat, juiz, título, resumo ou extração de memória; ele só é referenciado
+pelas settings de áudio (§4.3.2). A chave fica no próprio registro `provider` (cifrado, como as outras):
+as settings de áudio guardam só o id do provedor.
+- **Clientes < 1.5.0** não conhecem `elevenlabs`: inferem `openai` pela URL, mostram o provedor como
+  "OpenAI-compatible" (a lista de modelos e o chat com ele falham — ele não serve para chat) e, se o
+  usuário **editar** esse provedor num app antigo, regravam `kind: 'openai'`.
+- **Reparo (leitores ≥ 1.5.0)**: `kind: 'openai'` com host da `baseUrl` contendo `elevenlabs.io` vale
+  `elevenlabs` (a ElevenLabs não tem API de chat OpenAI-compatível). Escritores ≥ 1.5.0 gravam
+  `elevenlabs` explícito.
 
 #### 4.3.2 `setting`
 
@@ -383,17 +401,48 @@ Registros `setting` **nunca** são tombstones (ids fixos): remover = `value: nul
 | `smartApproveDefaults` (desde 1.4.0) | `smartApproveDefaults` | `SmartApproveDefaults` = `{ environment: string, acceptEditsInRoot: boolean, capture: ContextCaptureConfig, capturePrompts?: { prompt: string \| null, template: string \| null, derivePrompt: string \| null } }` (`ContextCaptureConfig` = `{ enabled, providerId: string \| null, model: string \| null, maxTokens: number \| null, lookback, thinkingTokens?: number \| null, cache?: boolean }` — `thinkingTokens` e `cache` desde 1.4.1, opcionais; `cache` ausente = ligado) |
 | `autoTitle` (desde 1.4.0) | `autoTitle` | `AutoTitleSettings` = `{ providerId: string \| null, model: string \| null, useMemory: boolean, maxTokens: number, prompt: string \| null, thinkingTokens?: number \| null }` (`thinkingTokens` desde 1.4.1, opcional) |
 | `toolOutputSpillChars` (desde 1.4.0) | `toolOutputSpillChars` | `number` (caracteres; o app limita à faixa dele) |
+| `audioInput` (desde 1.5.0) | `audioInput` | `AudioInputSettings` **sem `deviceId`** = `{ pttEnabled: boolean, pttKey: string \| null, silenceStopEnabled: boolean, silenceStopMs: number /* 0 = sem limite */, language: string }` (ditado: push-to-talk, parada por silêncio, idioma) |
+| `sttSettings` (desde 1.5.0) | `sttSettings` | `SttSettings` **sem as partes do dispositivo** = `{ mode: 'api' \| 'local' \| 'hybrid', api: { providerId: string \| null, model: string }, local: { engine: 'whisper.cpp' \| 'vosk' \| 'nemotron', model: string } \| null, livePartials: boolean, reusePartialFinal?: boolean }` |
+| `ttsSettings` (desde 1.5.0) | `ttsSettings` | `TtsSettings` **sem as partes do dispositivo** = `{ backend: 'api' \| 'local', api: { providerId: string \| null, model: string, voice: string \| null, elevenLabsWs?: false }, local: { engine: 'kokoro' \| 'chatterbox', voice: string } \| null }` (`local: null` = limpo pelo usuário; `elevenLabsWs` só gravado como `false` = HTTP por frase em vez do WebSocket da ElevenLabs) |
+| `voiceCallDefaults` (desde 1.5.0) | `voiceCallDefaults` | `VoiceCallDefaults` = `{ enabled: boolean, interjections: InterjectionPolicy, fillers: { enabled, prompt: string \| null, delayMs: number, pool: { text: string, contexts: FillerContext[] }[] \| null }, turn: VoiceCallTurnConfig, model: { providerId: string, model: string, params: ChatParams } \| null, basePromptEnabled: boolean, basePrompt: string \| null, endCall: boolean }` (padrões globais da chamada de voz, herdados pelos campos `null` de `ChatConfig.voice`) |
 
 O par do modelo padrão vira **um** registro para nunca misturar provedor de um dispositivo com modelo
-de outro. Os `providerId` dentro de `smartApproveDefaults.capture` e de `autoTitle` são ids de registros
-`provider` (como `defaultModel.providerId`): o leitor resolve pelo id, e um provedor que não existe
-localmente vale como "sem modelo" (nunca cai noutro provedor).
+de outro. Os `providerId` dentro de `smartApproveDefaults.capture`, `autoTitle`, `sttSettings.api`,
+`ttsSettings.api` e `voiceCallDefaults.model` são ids de registros `provider` (como
+`defaultModel.providerId`): o leitor resolve pelo id, e um provedor que não existe localmente vale como
+"sem modelo" (nunca cai noutro provedor) — em stt/tts, "nenhum provedor escolhido" (a pré-checagem da
+chamada pede para escolher outro); no modelo da chamada, "sem modelo próprio" (o turno usa o modelo do
+chat).
+
+**Settings de áudio: partes do dispositivo (desde 1.5.0).** O registro leva as preferências; o que só
+vale na máquina onde foi escolhido NUNCA é enviado e, ao aplicar um registro, o leitor DEVE manter o
+valor local dessas partes (e descartá-las se vierem no registro):
+- `audioInput.deviceId` (microfone desta máquina).
+- `sttSettings.local.installed` / `ttsSettings.local.installed` (o modelo local foi baixado AQUI). Ao
+  aplicar: mantém o valor local se o `engine` recebido é o mesmo do local (a semântica de "instalado" é
+  por motor), senão `false` (a UI deste dispositivo oferece o download).
+- **Modo avançado (GPU local)**: o bloco `gpu` de `sttSettings`/`ttsSettings` (motor, voz — que pode ser
+  um arquivo de voz do usuário só desta máquina —, passos e parâmetros por motor) e o valor `'gpu'` de
+  `sttSettings.mode`/`ttsSettings.backend`. Escritores NÃO DEVEM enviar `'gpu'`: um dispositivo em modo
+  GPU envia o `mode`/`backend` que já está online (sem registro: o padrão, `'api'` para stt e `'local'`
+  para tts). Ao aplicar: um dispositivo em `'gpu'` continua em `'gpu'` (o resto do registro é aplicado);
+  `'gpu'` recebido nunca é aplicado (vale o local). Ou seja: a escolha sem GPU (API/local/híbrido) e
+  tudo o mais sincronizam; ligar a GPU é por computador — um notebook sem GPU nunca passa a falar pela
+  GPU do desktop.
+- Endereço/chave resolvidos do provedor (`api.baseUrl`, `api.apiKey`, `api.providerKind`,
+  `api.extraBody`) nunca são gravados nem enviados; se vierem, o leitor os descarta. **Nenhuma setting
+  de áudio carrega segredo** — as chaves ficam nos registros `provider`.
+- `value: null` (setting removida) num leitor com partes do dispositivo: o leitor fica só com elas
+  (ex.: `audioInput` = `{ deviceId }`), que valem como "padrões + o microfone desta máquina".
+Trocar só uma parte do dispositivo (ex.: o microfone) não gera revisão nova.
 
 **Ids novos num dispositivo que já sincronizava (desde 1.4.0).** Ao ganhar um id de `setting` novo, o
 cliente DEVERIA, uma única vez e **depois** de um pull completo, enviar o valor local dos ids novos que
 ainda não têm registro online (se já existe registro — outro dispositivo enviou antes — vale o online,
-aplicado pelo pull). Leitores que não conhecem um id de `setting` (clientes < 1.4.0) o ignoram e
-guardam o registro (§4.2).
+aplicado pelo pull). Leitores que não conhecem um id de `setting` (clientes < 1.4.0; os de áudio,
+clientes < 1.5.0) o ignoram e guardam o registro (§4.2). Em 1.5.0 a mesma passada envia a `voice` local
+de chats e personas (§4.3.6) cujo registro online ainda não tem `voice` (merge por chave da `config`; um
+`voice` que já está online vence).
 
 #### 4.3.3 `preset` (persona)
 
@@ -403,6 +452,8 @@ guardam o registro (§4.2).
 ```
 `config` = `sanitizePresetConfig` (`PRESET_FIELDS`) **sem `cwd`** — o diretório raiz opcional da
 persona é local do dispositivo (§4.4). Ao aplicar um registro remoto, o cliente mantém o `cwd` local.
+Desde 1.5.0 `config.voice` (`VoiceCallConfig`, a chamada de voz da persona — §4.3.6) sincroniza; até
+1.4.1 era local e não era enviado.
 
 #### 4.3.4 `memory_collection`
 
@@ -434,6 +485,22 @@ o dispositivo que fez a troca envia a nova revisão (regra determinística: todo
 `updatedAt` muda a cada mensagem (ordem da sidebar), então o host reenvia o registro `chat` durante o
 turno (aceito: LWW por campo, coalescido). `config.cwd` é local do dispositivo (§4.4). `hostCwd` é escrito pelo host (quando vira host ou muda a
 raiz) só para exibir avisos ("diretório raiz /home/x/proj no PC") — nunca é aplicado como raiz local.
+
+**`config.voice` (desde 1.5.0; antes local do dispositivo)** — a chamada de voz do chat (na persona, o
+mesmo campo em `PresetConfig`), LWW por chave da `config` como o resto:
+```ts
+VoiceCallConfig = { enabled: boolean | null,                      // null = herda (persona → voiceCallDefaults)
+  model: { providerId: string, model: string, params: ChatParams } | null,   // modelo da chamada; null = herda
+  tools: { enabledTools: ToolName[] | null, maxToolOutputChars: number | null } | null,
+  voicePrompt: string | null, promptMode?: 'append' | 'replace' | 'none' | null,
+  fillers: { enabled: boolean, prompt: string | null } | null,
+  interjections: InterjectionPolicy | null, endCall?: boolean | null }
+```
+Campos `null`/ausentes herdam (chat → persona de origem `presetId` → `voiceCallDefaults`, §4.3.2).
+`voice.model.providerId` é um id de `provider` (remapeado no merge, §12; provedor que não existe
+localmente = "sem modelo próprio"). `voice.tools.enabledTools` conta em `usesLocalTools` (§8.9). Clientes
+< 1.5.0 guardam `voice` como chave desconhecida e a preservam ao regravar o chat; mas editar uma
+**persona** num app < 1.5.0 (que reescreve a `config` pelos campos que conhece) apaga a `voice` dela.
 
 #### 4.3.7 `session`
 
@@ -478,6 +545,44 @@ são append-only no app (editar, apagar, `insertAt` da compactação desloca `se
 uma nova revisão do registro, e todas acontecem no host (§8). O `seq` dentro do plaintext é a posição
 na sessão (não confundir com o `seq` do servidor). Referências a anexos (`clearchat-attachment://…`)
 ficam como estão (§14).
+
+**Voz no histórico (desde 1.5.0)** — campos opcionais de `MessageMeta`, só exibição/custos (nunca
+mudam o que vai ao modelo):
+```ts
+MessageMeta.voice?: { source: 'call' | 'dictation',   // 'call' = fala da chamada de voz; 'dictation' = texto ditado no composer
+  callId?: string, durationMs?: number /* usuário: áudio transcrito */, sttModel?: string,
+  spoken?: true | 'partial' /* assistente: falada inteira ou em parte */, ttsModel?: string }
+MessageMeta.voiceCall?: { callId: string, phase: 'start' | 'end', startedAt: number, endedAt?: number,
+  durationMs?: number, endedBy?: 'user' | 'agent' | 'error', reason?: string,
+  usage?: { turns, userSpeechMs, stt: { mode, model?, apiRequests, apiAudioMs, localRequests, cost?, costedRequests },
+            tts: { backend: 'api' | 'elevenlabs' | 'local' | 'gpu', model?, chars, audioMs, cost?, estimated? },
+            llm: { calls, cost, costed } } }
+```
+Os **marcadores de início/fim da chamada** são mensagens `role: 'assistant'`, `synthetic: true`, com
+`meta.voiceCall` (o `content` traz um texto legível, ex. "Chamada encerrada · 4 min 12 s · por você"). São
+**só de exibição**: NUNCA vão ao modelo (nem à compactação, busca, `read_history` ou extração de
+memórias); leitores DEVERIAM mostrá-los como divisórias (duração, quem encerrou, custos — o custo da fala
+com `estimated` é estimativa). Mensagens com `voice.source = 'call'` DEVERIAM aparecer em itálico com um
+ícone (microfone/alto-falante). São mensagens comuns do conteúdo do chat (gravadas pelo host, §8).
+
+**Codificação no registro (obrigatória).** Nos apps o marcador é `meta.kind: 'voice-call'`, mas no
+plaintext do registro ele vai com **`meta.kind: 'memory-extraction'`, `meta.voiceCall` presente e
+`meta.memoryExtraction` ausente**. Motivo: apps ≤ 0.9.0 (protocolo ≤ 1.4.1) só tratam como só de
+exibição os `kind` `error` e `memory-extraction` (`DISPLAY_ONLY_KINDS`) — um `kind` desconhecido, mesmo
+com `synthetic: true`, entraria na request ao modelo como mensagem do assistente se um app antigo
+hospedasse ou continuasse o chat. Com `memory-extraction` o app antigo já o descarta da request, da
+compactação, da busca, do `read_history` e da extração, e não desenha nada (o card da extração exige
+`memoryExtraction`) — o marcador só some da tela dele. Regras:
+- Escritores ≥ 1.5.0 DEVEM gravar o marcador assim (a troca é só no registro; localmente continua
+  `voice-call`).
+- Leitores ≥ 1.5.0: `kind: 'memory-extraction'` com `voiceCall` objeto e sem `memoryExtraction` ⇒
+  marcador (`voice-call`); DEVEM aceitar também `kind: 'voice-call'` explícito. Um card de extração de
+  verdade nunca tem `voiceCall`.
+- Leitores < 1.5.0 ignoram `voice`/`voiceCall`; o marcador fica invisível neles e nunca vai ao modelo.
+
+A tool `end_call` (a chamada encerrada pelo agente) é histórico normal: um `tool_calls` com
+`function.name = 'end_call'` (`{ reason? }`) e o resultado `"Chamada encerrada pelo agente."` — vai ao
+modelo como qualquer tool.
 
 **Árvore de versões (desde 1.2.0).** As mensagens de uma sessão formam uma árvore: `parentId` = id da
 mensagem anterior no mesmo ramo, na mesma sessão; `null` = raiz. Editar uma mensagem digitada pelo
@@ -546,6 +651,13 @@ Ver §13 (formato do bundle).
 | cache de modelos, `localStorage` da UI (aba do painel, seções recolhidas, grupos recolhidos, largura do painel de arquivo…) | renderer | estado de UI / tamanho de tela |
 | estado do próprio sync (cursor, outbox, revs, credenciais, DEK) | tabelas `sync_*` / chaveiro | por dispositivo |
 | skills não marcadas para sync | pastas | opt-in (§13) |
+| partes do dispositivo das settings de áudio: `audioInput.deviceId`, `local.installed`, bloco `gpu` e modo `'gpu'` de `sttSettings`/`ttsSettings` (desde 1.5.0, §4.3.2) | `settings` | microfone e hardware desta máquina |
+| `gpuVoiceMeasured` (medições do autoteste da GPU) | `settings` | desempenho desta máquina |
+| modelos locais de voz baixados (whisper.cpp, Vosk, Kokoro…) e o `manifest.json` deles | `userData/models` | arquivos grandes, baixados sob demanda em cada dispositivo |
+| runtime da GPU (Python, PyTorch, motores, pesos) e o estado de instalação/servidor local | `userData/gpu-runtime` | por máquina (hardware, sistema) |
+| vozes do usuário para clonagem (áudios de referência) | `userData/gpu-voices` | arquivos de áudio locais (a voz escolhida é só um id, local junto com o bloco `gpu`) |
+| cache de clipes de interjeição/preâmbulo por voz | `userData/voice-clips` | derivado; regerado em cada dispositivo |
+| logs do modo sombra da chamada (`voice-eval/*.jsonl`) e o estado da chamada em andamento | `userData` / memória do main | diagnóstico e execução locais |
 
 Tudo que não está nesta tabela e corresponde às tabelas `providers`, `presets`, `chats`, `sessions`,
 `messages`, `memory_collections`, `memories` e às chaves de `settings` da §4.3.2 é sincronizado.
@@ -1197,7 +1309,8 @@ expiração nem entrega na reconexão.
 ### 8.9 Avisos de ferramentas locais e "fixar host"
 
 - `usesLocalTools(chat)` = `config.enabledTools` contém alguma de `list_dir, read_file, search_files,
-  find_files, write_file, edit_file, shell, process_start, process_logs, process_list, process_stop`, **ou**
+  find_files, write_file, edit_file, shell, process_start, process_logs, process_list, process_stop`
+  (também em `config.voice.tools.enabledTools`, as tools liberadas na chamada de voz — desde 1.5.0), **ou**
   `config.skills.enabled`.
 - Ao assumir/trocar o host de um chat com ferramentas locais, o cliente DEVE mostrar um aviso forte:
   *"Este chat usa ferramentas locais (diretório raiz `<hostCwd.path>` no `<host>`). Executar no
@@ -1438,9 +1551,12 @@ do servidor.
    `ChatConfig.smartApprove.providerId`, `ChatConfig.smartApprove.capture.providerId`,
    `ChatConfig.memory.extraction.providerId`, `Session.providerId`, os mesmos campos em `PresetConfig`,
    settings `defaultModel.providerId`, `smartApproveDefaults.capture.providerId` e `autoTitle.providerId`
-   (desde 1.4.0); `ChatConfig.presetId`, setting
+   (desde 1.4.0); `ChatConfig.voice.model.providerId` (chats e personas), settings
+   `sttSettings.api.providerId`, `ttsSettings.api.providerId` e `voiceCallDefaults.model.providerId`
+   (desde 1.5.0); `ChatConfig.presetId`, setting
    `defaultPresetId`; `ChatConfig.memory.collections[]` e `writeTo` (chats e personas), `Memory.collectionId`;
-   `Memory.supersedesId`. Metadados informativos em `MessageMeta` não são remapeados.
+   `Memory.supersedesId`. Metadados informativos em `MessageMeta` (inclusive `voice`/`voiceCall`) não
+   são remapeados.
 6. **Conteúdo vencedor**: priorizar online → o conteúdo online fica e o local é descartado para essas
    entidades; priorizar local → o conteúdo local é enviado por cima (`base_rev = rev online`). **Chats
    com o mesmo id e histórias diferentes**: a versão perdedora é descartada (o diálogo do merge avisa
@@ -1946,6 +2062,7 @@ gastem o limite do dono do e-mail ou o bloqueiem.
 | 1.3.0 | 2026-10-20 | Adições compatíveis — arquivos do host num controle remoto: comandos `fs.list` (pasta do chat no host, com raiz/confinamento do host) e `fs.read` (pedaços de até 512 KiB em base64 dentro do resultado cifrado, teto de 200 MiB por arquivo), só leitura, sem janela, sem dedupe, aceitos com o agente rodando, com as mesmas regras de caminho da aba Arquivos/tools de leitura do host e recusa com `code` (§8.6); `COMMAND_MAX_BYTES` explicitado também para o `remote.result` e constantes `FS_*` (§17.1); §2 cita o tamanho dos envelopes de comando. Servidor ≥ 1.3.0 precisa repassar os kinds novos antes de os apps os usarem. |
 | 1.4.0 | 2026-10-21 | Adições compatíveis — preferências que eram locais passam a sincronizar como registros `setting`: `smartApproveDefaults` (padrões globais do Smart-Approve: descrição do ambiente, "aceitar edições dentro da raiz", coleta de contexto e os prompts do resumidor `capturePrompts`), `autoTitle` (título automático) e `toolOutputSpillChars` (limite para salvar saídas de tool em arquivo) (§4.3.2); envio único dos ids novos depois do primeiro pull num dispositivo que já sincronizava (§4.3.2); remapeamento no merge dos `providerId` dentro deles e de `ChatConfig.smartApprove.capture` (§12); `updateDismissedVersion` e a largura do painel de arquivo listados como locais (§4.4); tipos de referência do app 0.8.x, com os campos opcionais novos da config do chat/persona citados (§4.3). Servidor: nenhuma mudança de comportamento (ids de `setting` não são filtrados) — só a versão informada em `/api/info`/`welcome`. |
 | 1.4.1 | 2026-10-21 | Adições compatíveis (só campos opcionais em objetos que já sincronizam): "Tokens de pensamento" das chamadas laterais com raciocínio obrigatório — `SmartApproveConfig.thinkingTokens` (juiz; na config do chat/persona), `ContextCaptureConfig.thinkingTokens` (resumidor; em `smartApprove.capture` e `smartApproveDefaults.capture`) e `AutoTitleSettings.thinkingTokens` (título), cada um `number \| null`, ausente/`null` = o padrão do app; e o liga/desliga do "Cache do prompt" — `SmartApproveConfig.cache` (juiz) e `ContextCaptureConfig.cache` (resumidor; em `smartApprove.capture` e `smartApproveDefaults.capture`), `boolean`, ausente = ligado (o app só grava `false`) (§4.3, §4.3.2). Nenhum id de `setting` novo (sem envio único). Servidor: nenhuma mudança de comportamento — só a versão informada em `/api/info`/`welcome`. |
+| 1.5.0 | 2026-10-23 | Adições compatíveis — áudio (ditado e chamada de voz): ids de `setting` novos `audioInput`, `sttSettings`, `ttsSettings` e `voiceCallDefaults` com as **partes do dispositivo** fora do registro e preservadas ao aplicar (`audioInput.deviceId`, `local.installed`, bloco `gpu` e modo/backend `'gpu'` — escritores nunca enviam `'gpu'`, um dispositivo em GPU continua em GPU), sem segredos (chaves só nos provedores), `providerId` resolvido pelo id e "sem provedor" quando não existe localmente (§4.3.2); envio único dos ids novos e da `voice` local de chats/personas depois do primeiro pull (§4.3.2); `ChatConfig.voice`/`PresetConfig.voice` (`VoiceCallConfig`, inclusive `promptMode`/`endCall`) passam a sincronizar — antes eram locais (§4.3.3, §4.3.6); `MessageMeta.voice` (fala/ditado), `MessageMeta.voiceCall` e os marcadores de início/fim da chamada (só de exibição; no registro com `kind: 'memory-extraction'` + `voiceCall` para que apps ≤ 0.9.0 — que mandariam um `kind` desconhecido ao modelo — os descartem; leitores ≥ 1.5.0 voltam a `voice-call`) e a tool `end_call` no histórico (§4.3.8); `provider.kind: 'elevenlabs'` (só voz, fora de tudo que é chat), capacidades por tipo, inferência pela URL e reparo do `openai` gravado por apps antigos (§4.3.1); remapeamento no merge do `providerId` de stt/tts, do modelo padrão da chamada e de `voice.model` (§12); tools da chamada em `usesLocalTools` (§8.9); itens locais do áudio (microfone, modelos baixados, runtime da GPU, vozes do usuário, clipes, medições, logs do modo sombra) (§4.4); tipos de referência do app com o áudio, depois do 0.9.0 (§4.3). Clientes < 1.5.0 (app ≤ 0.9.0): ignoram os ids novos; não mostram os marcadores (e nunca os mandam ao modelo); guardam `voice`/meta de voz como desconhecidos (editar uma persona num app antigo apaga a `voice` dela); mostram o provedor ElevenLabs como OpenAI-compatível. Servidor: nenhuma mudança de comportamento (ids de `setting` não são filtrados, meta e config vão cifrados) — só a versão informada em `/api/info`/`welcome`; o site passa a mostrar falas, marcadores de chamada e o provedor de voz. |
 
 ---
 

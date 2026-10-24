@@ -138,8 +138,29 @@ test('versões ao vivo: o app troca de versão → a escolha local é descartada
   await expect(page.getByTestId('branch-switcher').last()).toHaveAccessibleName('Versão 2 de 2')
 })
 
+test('chamada de voz: marcadores, falas em itálico com ícone e ditado', async ({ page }) => {
+  await page.getByRole('link', { name: /Chamada: planejar a semana/ }).click()
+  await expect(page.getByRole('heading', { name: 'Chamada: planejar a semana' })).toBeVisible()
+  const markers = page.getByTestId('voice-call-marker')
+  await expect(markers).toHaveCount(2)
+  await expect(markers.first()).toContainText('Chamada de voz iniciada')
+  await expect(markers.last()).toContainText('Chamada encerrada · 4 min · por você')
+  await expect(markers.last()).toContainText('(voz, estimado)')
+  await expect(page.getByText('Pode ser. Mas quinta eu tenho reunião o dia todo.')).toHaveClass(
+    /italic/
+  )
+  await expect(page.getByRole('img', { name: 'Falado na chamada de voz · 3,1 s' })).toBeVisible()
+  await expect(
+    page.getByRole('img', { name: 'Resposta falada na chamada (em parte)' })
+  ).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Ditado por voz' })).toBeVisible()
+  await expect(page.getByText('Resume o plano da semana em uma lista curta.')).not.toHaveClass(
+    /italic/
+  )
+})
+
 test('lista de conversas: filtro e atualização ao vivo pelo WebSocket', async ({ page }) => {
-  await expect(page.getByText(/5 conversas/)).toBeVisible()
+  await expect(page.getByText(/6 conversas/)).toBeVisible()
   await page.getByLabel('Filtrar conversas').fill('rsync')
   await expect(page.getByRole('link', { name: /Script de backup/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /Ideias de nomes/ })).toHaveCount(0)
@@ -153,14 +174,17 @@ test('lista de conversas: filtro e atualização ao vivo pelo WebSocket', async 
     const id = Object.values(u.records).find((r) => r.type === 'chat' && !r.deleted)!.id
     window.__mock!.remoteDeleteChat(id)
   })
-  await expect(page.getByText(/5 conversas/)).toBeVisible()
+  await expect(page.getByText(/6 conversas/)).toBeVisible()
 })
 
 test('provedores: adicionar, editar (preservando campos desconhecidos) e apagar', async ({
   page
 }) => {
   await page.getByRole('link', { name: 'Provedores' }).click()
-  await expect(page.getByTestId('provider-card')).toHaveCount(3)
+  await expect(page.getByTestId('provider-card')).toHaveCount(4)
+  const eleven = page.getByTestId('provider-card').filter({ hasText: 'ElevenLabs' })
+  await expect(eleven).toContainText('ElevenLabs (voz)')
+  await expect(eleven).toContainText('não aparece nos modelos de chat')
   await page.getByRole('button', { name: 'Adicionar' }).click()
   const dlg = page.getByRole('dialog')
   await dlg.getByLabel('Nome').fill('Groq')
@@ -210,7 +234,7 @@ test('provedores: adicionar, editar (preservando campos desconhecidos) e apagar'
   await card.getByRole('button', { name: 'Apagar Groq' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Apagar' }).click()
   await expect(page.getByText('Provedor apagado.')).toBeVisible()
-  await expect(page.getByTestId('provider-card')).toHaveCount(3)
+  await expect(page.getByTestId('provider-card')).toHaveCount(4)
 })
 
 test('edição concorrente: LWW por campo reaplica só o que mudou', async ({ page }) => {

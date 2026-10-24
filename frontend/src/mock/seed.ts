@@ -52,6 +52,8 @@ interface Msg {
   key?: string
   /** …e o rótulo da mãe (`null` = raiz; ausente = a anterior da lista). */
   parent?: string | null
+  /** Campos extras do `meta` (ex.: `voice`); com `synthetic: true` substitui o meta padrão. */
+  meta?: MessagePlain['meta']
 }
 
 async function chatItems(
@@ -155,13 +157,17 @@ async function chatItems(
         sessionId,
         seq: i + 1,
         message,
-        meta:
-          m.role === 'assistant'
-            ? {
-                model: m.model ?? opts.model,
-                usage: { promptTokens: 1800 + i * 300, completionTokens: 240 }
-              }
-            : {},
+        meta: m.meta?.synthetic
+          ? m.meta
+          : {
+              ...(m.role === 'assistant'
+                ? {
+                    model: m.model ?? opts.model,
+                    usage: { promptTokens: 1800 + i * 300, completionTokens: 240 }
+                  }
+                : {}),
+              ...m.meta
+            },
         createdAt: t,
         ...(ids
           ? {
@@ -236,6 +242,7 @@ export async function seedDemo(server: MockServer): Promise<void> {
   const orId = crypto.randomUUID()
   const anId = crypto.randomUUID()
   const olId = crypto.randomUUID()
+  const elId = crypto.randomUUID()
   const providers: [string, ProviderPlain][] = [
     [
       orId,
@@ -273,6 +280,18 @@ export async function seedDemo(server: MockServer): Promise<void> {
         createdAt: now - 10 * D,
         // campo desconhecido de uma versão futura: o site precisa preservá-lo ao regravar
         futureField: { keep: true }
+      }
+    ],
+    [
+      elId,
+      {
+        sv: 1,
+        name: 'ElevenLabs',
+        kind: 'elevenlabs',
+        baseUrl: 'https://api.elevenlabs.io',
+        apiKey: 'sk_9d2f4b6a8c0e1f3a5c7e9b1d3f5a7c9e',
+        headers: {},
+        createdAt: now - 5 * D
       }
     ]
   ]
@@ -446,7 +465,112 @@ export async function seedDemo(server: MockServer): Promise<void> {
       ]
     })
   ]
+  chats.push(await voiceCallChat(sk, userId, now - 4 * H, orId))
   for (const c of chats) server.remotePush(userId, c)
+}
+
+/** Conversa com uma chamada de voz (1.5.0): marcadores de início/fim, falas e um ditado. */
+async function voiceCallChat(
+  sk: Subkeys,
+  userId: string,
+  at: number,
+  providerId: string
+): Promise<PushItem[]> {
+  const callId = crypto.randomUUID()
+  // mesmo relógio do `pushMsgs`: a mensagem i (0-based) de 8 fica em at - 8 min + (i + 1) min
+  const startedAt = at - 7 * 60_000
+  const endedAt = at - 3 * 60_000
+  const sttModel = 'openai/whisper-large-v3-turbo'
+  const ttsModel = 'eleven_flash_v2_5'
+  return chatItems(sk, userId, {
+    title: 'Chamada: planejar a semana',
+    at,
+    model: 'anthropic/claude-sonnet-4.5',
+    providerId,
+    messages: [
+      {
+        role: 'assistant',
+        content: 'Chamada de voz iniciada',
+        meta: {
+          synthetic: true,
+          // no registro o marcador vai como 'memory-extraction' + voiceCall (§4.3.8)
+          kind: 'memory-extraction',
+          voiceCall: { callId, phase: 'start', startedAt }
+        }
+      },
+      {
+        role: 'user',
+        content: 'Me ajuda a organizar a semana? Tenho três entregas e a academia.',
+        meta: { voice: { source: 'call', callId, durationMs: 4200, sttModel } }
+      },
+      {
+        role: 'assistant',
+        content:
+          'Claro! Que tal as entregas de manhã, quando você rende mais, e a academia no fim da tarde de segunda, quarta e sexta?',
+        meta: { voice: { source: 'call', callId, spoken: true, ttsModel } }
+      },
+      {
+        role: 'user',
+        content: 'Pode ser. Mas quinta eu tenho reunião o dia todo.',
+        meta: { voice: { source: 'call', callId, durationMs: 3100, sttModel } }
+      },
+      {
+        role: 'assistant',
+        content:
+          'Então a quinta fica livre de entregas. Passo a terceira para sexta de manhã e deixo a tarde de quinta só para descansar e revisar o que…',
+        meta: { voice: { source: 'call', callId, spoken: 'partial', ttsModel } }
+      },
+      {
+        role: 'assistant',
+        content: 'Chamada encerrada · 4 min · por você',
+        meta: {
+          synthetic: true,
+          // no registro o marcador vai como 'memory-extraction' + voiceCall (§4.3.8)
+          kind: 'memory-extraction',
+          voiceCall: {
+            callId,
+            phase: 'end',
+            startedAt,
+            endedAt,
+            durationMs: endedAt - startedAt,
+            endedBy: 'user',
+            usage: {
+              turns: 2,
+              userSpeechMs: 7300,
+              stt: {
+                mode: 'api',
+                model: sttModel,
+                apiRequests: 6,
+                apiAudioMs: 11800,
+                localRequests: 0,
+                cost: 0.0009,
+                costedRequests: 6
+              },
+              tts: {
+                backend: 'elevenlabs',
+                model: ttsModel,
+                chars: 236,
+                audioMs: 15400,
+                cost: 0.0142,
+                estimated: true
+              },
+              llm: { calls: 2, cost: 0.0114, costed: 2 }
+            }
+          }
+        }
+      },
+      {
+        role: 'user',
+        content: 'Resume o plano da semana em uma lista curta.',
+        meta: { voice: { source: 'dictation', durationMs: 2600, sttModel } }
+      },
+      {
+        role: 'assistant',
+        content:
+          '- **Seg, qua e sex** — entregas de manhã, academia no fim da tarde\n- **Ter** — entrega 2\n- **Qui** — reunião; sem entregas\n- **Sex** — entrega 3 de manhã'
+      }
+    ]
+  })
 }
 
 /** Simula outro dispositivo criando uma conversa na conta de demonstração. */

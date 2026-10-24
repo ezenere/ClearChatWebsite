@@ -315,8 +315,11 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
 - **Uso**: `usage_*` ajustados na mesma transação (delta de `size`).
 - **Validação do push** (`sync/records.py`): tipos de `KNOWN_TYPES`, escopo por tipo, ids pelo padrão de
   `RECORD_ID_RE`, `setting` nunca tombstone e teto de bytes. Os ids de `setting` **não** são filtrados:
-  ids novos do app (ex.: `smartApproveDefaults`, `autoTitle`, `toolOutputSpillChars`, protocolo 1.4.0)
-  passam sem mudar o servidor.
+  ids novos do app (ex.: `smartApproveDefaults`, `autoTitle`, `toolOutputSpillChars`, protocolo 1.4.0;
+  `audioInput`, `sttSettings`, `ttsSettings`, `voiceCallDefaults`, protocolo 1.5.0) passam sem mudar o
+  servidor. Também não há nada a validar nos campos novos de 1.5.0 (`provider.kind: 'elevenlabs'`,
+  `ChatConfig.voice`, `MessageMeta.voice`/`voiceCall`, marcadores `kind: 'voice-call'`): vão dentro dos
+  envelopes cifrados — só o site (cliente) os lê e mostra.
 - **Ordem das checagens do push** (§7.4): validação → recibo (idempotência) → blobs → escopo
   (`scope_missing`/`scope_deleted`) → regras de conteúdo do chat (§8.4: divergência, `stale_base`,
   `not_host`, `chat_busy`) → revisão (`rev_mismatch`/`gone`) → cotas → escrita. As regras do chat vêm
@@ -379,7 +382,7 @@ As interpretações adotadas durante a implementação (corpos de resposta de `/
 `divergence/resolve`, `/keys/*` e `/blobs`; stream sem janela aberta; modos A/B do push e `chat_busy` em
 tolerância; ordem das checagens; `host.release` sem troca; eventos de tolerância; `keys.reset` com `4403`
 sem revogar; fechamento por ociosidade `1000`; refresh do site com corpo `{}`) foram incorporadas ao
-`docs/SYNC_PROTOCOL.md` (v1.4.1, ainda não lançado) — vale o que está lá.
+`docs/SYNC_PROTOCOL.md` (v1.5.0, ainda não lançado) — vale o que está lá.
 
 ## 5. Rate limiting
 
