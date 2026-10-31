@@ -70,7 +70,7 @@ function GithubIcon({ className }: { className?: string }) {
   )
 }
 
-const REPO_URL = 'https://github.com/ezenere/ClearChat'
+const REPO_URL = 'https://github.com/ezenere/ClearChatDesktop'
 const SERVER_REPO_URL = 'https://github.com/ezenere/ClearChatWebsite'
 
 const STACK = [

@@ -58,9 +58,9 @@ describe('utilitários', () => {
     expect(detectOS('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)')).toBe('ios')
   })
   it('releases do GitHub', () => {
-    expect(parseGithubRepo('https://github.com/ezenere/ClearChat/releases')).toEqual({
+    expect(parseGithubRepo('https://github.com/ezenere/ClearChatDesktop/releases')).toEqual({
       owner: 'ezenere',
-      repo: 'ClearChat'
+      repo: 'ClearChatDesktop'
     })
     expect(parseGithubRepo('https://exemplo.com/downloads')).toBeNull()
     const a = (name: string) => ({ name, browser_download_url: `u/${name}`, size: 1 })

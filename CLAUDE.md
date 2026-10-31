@@ -1,11 +1,13 @@
 # CLAUDE.md — ClearChatWebsite
 
-> ⚠️ **AVISO — PROTOCOLO COMPARTILHADO COM O APP**
-> Estes dois projetos (**ClearChat** app em `../CleartChat` ↔ **ClearChatWebsite** servidor/site) compartilham
-> o protocolo de sync em `docs/SYNC_PROTOCOL.md` (e `docs/test-vectors/`). Qualquer mudança no protocolo,
-> na criptografia, nos esquemas dos registros, nos endpoints ou nas mensagens de WebSocket precisa ser
-> feita **nos DOIS repositórios** (documentos idênticos, vetores regenerados, versão do protocolo
-> incrementada + changelog). Mudar um lado só quebra o sync.
+> ⚠️ **AVISO — PROTOCOLO DE SYNC COMPARTILHADO**
+> Este repositório faz parte da pasta `ClearChat/` (repositório pai com o que é compartilhado) junto com
+> `../ClearChatDesktop` (app), `../ClearChatWebsite` (servidor/site) e `../ClearChatMobile` (mobile).
+> O protocolo de sync tem fonte única em `../docs/SYNC_PROTOCOL.md` (e `../docs/test-vectors/`); o
+> `docs/` daqui é uma cópia byte a byte. Qualquer mudança no protocolo, na criptografia, nos esquemas dos
+> registros, nos endpoints ou nas mensagens de WebSocket: edite no pai, suba a versão + changelog, rode
+> `node ../scripts/protocol.mjs sync` e implemente no app **e** no servidor (o mobile revendora). Mudar
+> um lado só quebra o sync. Regras gerais: `../CLAUDE.md`.
 
 ## Onde está o quê
 - `docs/SYNC_PROTOCOL.md` — contrato normativo (vence qualquer outro documento).

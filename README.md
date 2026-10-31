@@ -1,17 +1,20 @@
 # ClearChatWebsite
 
-Servidor de sincronização **zero-knowledge** + site do [ClearChat](https://github.com/ezenere/ClearChat)
+Servidor de sincronização **zero-knowledge** + site do [ClearChat](https://github.com/ezenere/ClearChatDesktop)
 (app desktop de chat com IA). Um repositório só: **backend** (FastAPI + Postgres), **frontend** (React —
 landing, cadastro, login, painel que decifra no navegador) e **admin** (painel local do dono da instância).
 Instância oficial: https://clear.ezenere.com — qualquer pessoa pode hospedar a sua (self-host).
 
-> ⚠️ **AVISO — PROTOCOLO COMPARTILHADO COM O APP**
+> ⚠️ **AVISO — PROTOCOLO DE SYNC COMPARTILHADO**
 >
-> Estes dois projetos (**ClearChat** app ↔ **ClearChatWebsite** servidor/site) compartilham o protocolo
-> de sync em [`docs/SYNC_PROTOCOL.md`](docs/SYNC_PROTOCOL.md) (e os vetores em `docs/test-vectors/`).
-> **Qualquer mudança** no protocolo, na criptografia, nos esquemas dos registros, nos endpoints ou nas
-> mensagens de WebSocket precisa ser feita **nos DOIS repositórios** — mantenha os documentos idênticos,
-> regenere os vetores e suba a versão do protocolo. Mudar um lado só **quebra o sync**.
+> Este repositório faz parte do projeto [ClearChat](https://github.com/ezenere): app desktop
+> ([ClearChatDesktop](https://github.com/ezenere/ClearChatDesktop)), servidor de sync e site
+> ([ClearChatWebsite](https://github.com/ezenere/ClearChatWebsite)) e app mobile. Todos implementam o
+> protocolo em [`docs/SYNC_PROTOCOL.md`](docs/SYNC_PROTOCOL.md) (vetores em `docs/test-vectors/`), cuja
+> fonte única fica no repositório pai `ClearChat/docs/` — aqui é uma cópia idêntica. **Qualquer mudança**
+> no protocolo, na criptografia, nos esquemas dos registros, nos endpoints ou nas mensagens de WebSocket
+> é feita no pai, copiada com `node ../scripts/protocol.mjs sync` e implementada no app **e** no
+> servidor, com a versão do protocolo incrementada. Mudar um lado só **quebra o sync**.
 
 ## Estado
 

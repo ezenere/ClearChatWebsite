@@ -30,7 +30,7 @@ export interface Release {
   tarGz?: Asset
 }
 
-export const DEFAULT_RELEASES = 'https://github.com/ezenere/ClearChat/releases'
+export const DEFAULT_RELEASES = 'https://github.com/ezenere/ClearChatDesktop/releases'
 
 export function parseGithubRepo(url: string): { owner: string; repo: string } | null {
   const m = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:\/.*)?$/.exec(

@@ -8,7 +8,7 @@ export async function mockGithub(page: Page): Promise<void> {
     route.fulfill({
       json: {
         tag_name: 'v0.6.0',
-        html_url: 'https://github.com/ezenere/ClearChat/releases/tag/v0.6.0',
+        html_url: 'https://github.com/ezenere/ClearChatDesktop/releases/tag/v0.6.0',
         published_at: '2026-10-15T12:00:00Z',
         assets: [
           'ClearChat-0.6.0-setup-x64.exe',
@@ -23,7 +23,7 @@ export async function mockGithub(page: Page): Promise<void> {
         ].map((name, i) => ({
           name,
           size: 100_000_000 + i * 1_000_000,
-          browser_download_url: `https://github.com/ezenere/ClearChat/releases/download/v0.6.0/${name}`
+          browser_download_url: `https://github.com/ezenere/ClearChatDesktop/releases/download/v0.6.0/${name}`
         }))
       }
     })

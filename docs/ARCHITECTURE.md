@@ -443,7 +443,7 @@ Duas camadas:
 - Rotas: `/` (landing — ou login/painel se `landing` desligada), `/signup`, `/login`, `/setup`
   (definir senha de criptografia), `/unlock`, `/recover`, `/app` (painel), `/captcha`, `/captcha/done`.
 - Landing: apresenta o ClearChat (destaques do README do app, screenshots), downloads
-  (`https://github.com/ezenere/ClearChat/releases`), "Criar conta" só com `signupOpen`.
+  (`https://github.com/ezenere/ClearChatDesktop/releases`), "Criar conta" só com `signupOpen`.
 - Painel (tudo decifrado no navegador): conversas (listar/ver com markdown/apagar), provedores e chaves
   de busca (editar registros `provider` e `setting webSearchApiKeys`), trocar senha, recuperação, nova
   chave de recuperação, dispositivos (listar/renomear/revogar), apagar conta, "zerar criptografia".

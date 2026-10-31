@@ -32,7 +32,7 @@ test('landing apresenta o app, downloads da última release e links', async ({ p
   await expect(dl).toContainText('v0.6.0')
   await expect(page.getByRole('link', { name: 'GitHub' }).first()).toHaveAttribute(
     'href',
-    'https://github.com/ezenere/ClearChat'
+    'https://github.com/ezenere/ClearChatDesktop'
   )
   // galeria de capturas
   await page.getByRole('tab', { name: /Questionário do agente/ }).click()
@@ -46,7 +46,7 @@ test('GitHub fora do ar: links caem na página de releases', async ({ page }) =>
   await page.goto('/')
   await expect(page.locator('#download').getByRole('link', { name: /Instalador/ })).toHaveAttribute(
     'href',
-    'https://github.com/ezenere/ClearChat/releases/latest'
+    'https://github.com/ezenere/ClearChatDesktop/releases/latest'
   )
 })
 

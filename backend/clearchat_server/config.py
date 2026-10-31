@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     instance_name: str = "ClearChat"
     initial_signup_open: bool = True
     initial_landing_enabled: bool = True
-    download_url: str = "https://github.com/ezenere/ClearChat/releases"
+    download_url: str = "https://github.com/ezenere/ClearChatDesktop/releases"
 
     # segredos
     server_secret: str = ""

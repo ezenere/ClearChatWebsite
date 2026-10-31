@@ -188,7 +188,7 @@ export class MockServer {
         gateway: false
       },
       links: {
-        download: 'https://github.com/ezenere/ClearChat/releases',
+        download: 'https://github.com/ezenere/ClearChatDesktop/releases',
         ...(c.signupOpen ? { signup: '/signup' } : {})
       }
     }
