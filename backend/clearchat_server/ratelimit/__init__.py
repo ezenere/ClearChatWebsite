@@ -31,8 +31,10 @@ def _window_start(now: datetime, window_s: int) -> datetime:
 
 
 class RateLimiter:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, multiplier: int = 1) -> None:
         self.engine = engine
+        # só testes locais (Settings.rate_limit_multiplier): tetos maiores; produção = 1
+        self.multiplier = max(1, int(multiplier))
 
     async def hit(self, limits: list[Limit], now: datetime | None = None) -> None:
         """Conta 1 em cada balde; se algum passou do limite → ApiError rate_limited (429)."""
@@ -48,7 +50,7 @@ class RateLimiter:
                     "RETURNING count",
                     {"b": f"{lim.bucket}:{lim.window_s}", "w": start},
                 )
-                if count > lim.limit:
+                if count > lim.limit * self.multiplier:
                     end = start + timedelta(seconds=lim.window_s)
                     retry = max(retry, math.ceil((end - now).total_seconds()))
         if retry:

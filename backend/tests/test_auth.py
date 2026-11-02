@@ -161,6 +161,17 @@ async def test_rate_limit_per_ip_trusted_proxy(srv):
     assert statuses[:20] == [202] * 20 and statuses[20] == 429
 
 
+async def test_rate_limit_multiplier_only_for_local_tests(make_server):
+    # RATE_LIMIT_MULTIPLIER (só testes locais): os tetos crescem na mesma proporção
+    srv = await make_server(rate_limit_multiplier=3)
+    ip = ipk()
+    statuses = []
+    for i in range(61):
+        r = await srv.http.post("/api/v1/auth/code/request", json={"email": f"m{i}@example.com"}, headers=ip)
+        statuses.append(r.status_code)
+    assert statuses[:60] == [202] * 60 and statuses[60] == 429
+
+
 def net_ip(net: str) -> dict[str, str]:
     """IP aleatório dentro de uma /24 fixa (os limites de verify contam por e-mail + rede do cliente)."""
     return {"X-Real-IP": f"{net}.{random.randint(1, 254)}"}

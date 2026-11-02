@@ -7,7 +7,7 @@ from functools import cached_property
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     chat_state_orphan_grace_h: float = 24
     # confere as conexões vivas contra o banco (revogação/ban perdidos com o LISTEN fora) a cada N s
     ws_reconcile_interval_s: float = 60
+    # SÓ PARA TESTES LOCAIS: multiplica os tetos dos limites de taxa (código por e-mail/IP, login…).
+    # Produção fica em 1; o servidor de teste do app mobile usa um valor alto para a suíte inteira
+    # (muitos logins seguidos do mesmo IP) caber numa hora. Bloqueios por falha não mudam.
+    rate_limit_multiplier: int = Field(default=1, ge=1)
 
     log_level: str = "info"
     log_format: Literal["json", "text"] = "json"

@@ -124,7 +124,7 @@ def create_app(
             engine=engine,
             mailer=mailer or Mailer(settings),
             http=http or httpx.AsyncClient(timeout=10),
-            limiter=RateLimiter(engine),
+            limiter=RateLimiter(engine, settings.rate_limit_multiplier),
             instance=InstanceSettingsCache(engine, settings),
             hub=hub,
             coordinator=Coordinator(engine, hub, settings),
