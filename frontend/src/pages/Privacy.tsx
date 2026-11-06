@@ -210,9 +210,10 @@ export default function Privacy() {
                   nome, seus dispositivos e metadados técnicos dos registros.
                 </li>
                 <li>
-                  O conteúdo das conversas vai <B>direto do seu dispositivo</B> para os provedores
-                  de IA que você mesmo configura, com as suas chaves — não passa pelo nosso
-                  servidor.
+                  As chamadas aos provedores de IA que você configura, com as suas chaves, saem{' '}
+                  <B>direto do dispositivo que executa o chat</B> — não passam pelo nosso servidor.
+                  O que passa por ele (sincronização e controle remoto de um chat que roda em outro
+                  dispositivo) vai sempre <B>cifrado de ponta a ponta</B>.
                 </li>
                 <li>
                   Não há anúncios, não há SDKs de análise ou rastreamento e não vendemos nem
@@ -313,10 +314,18 @@ export default function Privacy() {
 
             <Section id="provedores-ia">
               <p>
-                Os apps do ClearChat enviam o conteúdo das conversas{' '}
-                <B>diretamente do seu dispositivo</B> para os provedores de IA e de voz que você
-                configura com as suas próprias chaves de API — por exemplo OpenAI, OpenRouter,
-                ElevenLabs ou endpoints locais. Esse tráfego <B>não passa pelo nosso servidor</B>.
+                Cada chat é executado por um dispositivo seu (o computador ou o celular). É esse
+                dispositivo que envia a conversa <B>diretamente</B> aos provedores de IA e de voz
+                que você configura com as suas próprias chaves de API — por exemplo OpenAI,
+                OpenRouter, ElevenLabs ou endpoints locais. Essas chamadas{' '}
+                <B>não passam pelo nosso servidor</B>.
+              </p>
+              <p>
+                Quando você acompanha ou controla pelo celular ou pelo site um chat que roda em
+                outro dispositivo, as suas mensagens, as respostas ao vivo e os comandos (aprovar,
+                parar…) passam pelo nosso servidor, que só os repassa{' '}
+                <B>cifrados de ponta a ponta</B>, sem conseguir lê-los. O mesmo vale para o
+                histórico sincronizado: o servidor guarda apenas a versão cifrada.
               </p>
               <p>
                 O tratamento feito por esses provedores segue as políticas de privacidade e os
@@ -426,11 +435,11 @@ export default function Privacy() {
                 privacidade.
               </p>
               <p>
-                A localização <B>não é enviada ao servidor do ClearChat</B> nem armazenada por nós.
-                O resultado da ferramenta (coordenadas, nome do lugar e lugares encontrados) fica no
-                histórico do chat, como qualquer mensagem: com conta, ele é sincronizado com
-                criptografia de ponta a ponta (o servidor não consegue ler); sem conta, fica só no
-                seu aparelho. Apagar o chat apaga esse histórico.
+                O servidor do ClearChat <B>nunca recebe a localização em claro</B>, e ela não é
+                usada por nós para nada. O resultado da ferramenta (coordenadas, nome do lugar e
+                lugares encontrados) fica no histórico do chat, como qualquer mensagem: com conta,
+                ele é sincronizado com criptografia de ponta a ponta (o servidor não consegue ler);
+                sem conta, fica só no seu aparelho. Apagar o chat apaga esse histórico.
               </p>
             </Section>
 
