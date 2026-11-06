@@ -29,6 +29,7 @@ async def info(ctx: AppContext = Depends(get_ctx)) -> Any:
             "captcha": {"provider": "turnstile", "siteKey": s.turnstile_site_key} if inst.captcha_active(s) else None,
             "landing": inst.landing_enabled,
             "gateway": False,
+            "push": ctx.push.features(),
         },
         "links": links,
     }

@@ -35,6 +35,9 @@ services:
       db: { condition: service_healthy }
     volumes:
       - blobs:/data/blobs
+      # notificações push (opcional): pasta com o JSON da conta de serviço do Firebase, só leitura.
+      # No .env: FCM_SERVICE_ACCOUNT_FILE=/run/secrets/clearchat/<arquivo>.json (vazio = sem push).
+      - ${PUSH_SECRETS_DIR:-./secrets}:/run/secrets/clearchat:ro
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8100}:8000"
     networks: [internal]

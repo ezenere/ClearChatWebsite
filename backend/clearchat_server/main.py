@@ -31,6 +31,8 @@ from .jobs import gc_loop, notify_listener
 from .keys import routes as keys_routes
 from .logging_setup import setup_logging
 from .mail import Mailer
+from .push import routes as push_routes
+from .push.service import PushService
 from .ratelimit import RateLimiter
 from .realtime.coordinator import Coordinator
 from .realtime.hub import Hub
@@ -119,17 +121,21 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = make_engine(settings.database_url, settings.db_pool_size)
         hub = Hub()
+        app_http = http or httpx.AsyncClient(timeout=10)
+        push = PushService(engine, settings, app_http, hub)
         ctx = AppContext(
             settings=settings,
             engine=engine,
             mailer=mailer or Mailer(settings),
-            http=http or httpx.AsyncClient(timeout=10),
+            http=app_http,
             limiter=RateLimiter(engine, settings.rate_limit_multiplier),
             instance=InstanceSettingsCache(engine, settings),
             hub=hub,
             coordinator=Coordinator(engine, hub, settings),
             blobs=BlobStore(settings),
+            push=push,
         )
+        ctx.coordinator.push = push
         app.state.ctx = ctx
         await ctx.coordinator.boot()
         tasks: list[asyncio.Task[None]] = []
@@ -143,6 +149,7 @@ def create_app(
         finally:
             await hub.close_all(1001, "server_restart")
             await ctx.coordinator.shutdown()
+            await push.close()
             for t in tasks:
                 t.cancel()
             for t in tasks:
@@ -196,6 +203,7 @@ def create_app(
     v1.include_router(keys_routes.router)
     v1.include_router(sync_routes.router)
     v1.include_router(blob_routes.router)
+    v1.include_router(push_routes.router)
     app.include_router(v1, prefix=f"{base}/api/v1")
     app.include_router(instance_routes.router, prefix=f"{base}/api")
     app.add_api_websocket_route(f"{base}/ws", ws_endpoint)

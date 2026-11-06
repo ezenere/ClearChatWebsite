@@ -356,8 +356,10 @@ def msg(mid: str, cid: str, base_rev: int = 0, **kw: Any) -> dict[str, Any]:
 async def make_server(tmp_path: Path):  # type: ignore[no-untyped-def]
     servers: list[TestServer] = []
 
-    async def factory(turnstile: Any = None, **over: Any) -> TestServer:
-        srv = TestServer(make_settings(tmp_path, **over), turnstile)
+    async def factory(turnstile: Any = None, http_handler: Any = None, **over: Any) -> TestServer:
+        # turnstile / http_handler: handler do httpx.MockTransport das chamadas de saída da api
+        # (Turnstile, FCM falso…)
+        srv = TestServer(make_settings(tmp_path, **over), http_handler or turnstile)
         await srv.start()
         servers.append(srv)
         return srv

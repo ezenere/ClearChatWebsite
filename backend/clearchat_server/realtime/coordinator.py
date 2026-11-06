@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -36,6 +36,9 @@ from ..errors import ApiError
 from ..sync.envelope import parse_envelope
 from ..util import RECORD_ID_RE, iso, utcnow
 from .hub import Conn, Hub
+
+if TYPE_CHECKING:
+    from ..push.service import PushService
 
 log = logging.getLogger("clearchat.host")
 
@@ -173,6 +176,8 @@ class Coordinator:
         # ("grace" | "force", user_id) → quando vence o timer de varredura do usuário (time.monotonic)
         self._sweep_due: dict[tuple[str, uuid.UUID], float] = {}
         self._closing = False
+        # notificações push (§22.6, aviso "host caiu"); ligado pela aplicação depois de criar os dois
+        self.push: PushService | None = None
 
     # ------------------------------------------------------------------ utilidades
     def broadcast_state(self, user_id: uuid.UUID, state: dict[str, Any]) -> None:
@@ -752,6 +757,12 @@ class Coordinator:
             self.broadcast_state(c.user_id, st_json)
         for key in force_keys:
             self._schedule(self.force_timers, key, self.settings.handover_force_timeout_s, self._force_expired)
+        if self.push is not None and self.push.configured:
+            # host de volta: cancela o aviso "host caiu" pendente e apaga o mostrado (§22.6)
+            try:
+                await self.push.host_back(c.user_id, c.device_id)
+            except Exception:
+                log.exception("push: falha no host_back")
         _, q = self.pending_revocations.pop(c.device_id, (c.user_id, {}))
         seen = {m["chat_id"] for m in after_welcome if m["t"] == "host.revoked"}
         after_welcome = [m for m in q.values() if m["chat_id"] not in seen] + after_welcome
@@ -808,6 +819,7 @@ class Coordinator:
         próximo prazo, se houver."""
         self._sweep_due.pop(("grace", user_id), None)
         post: Post = []
+        running: dict[tuple[uuid.UUID, Any], list[str]] = {}
         async with self.engine.begin() as conn:
             await lock_user(conn, user_id)
             limit = utcnow() + timedelta(milliseconds=50)
@@ -821,6 +833,10 @@ class Coordinator:
                 )
                 if not self.hub.is_online(r.host_device_id)
             ]
+            # chats que rodavam (janela aberta) quando o host caiu → aviso push "host caiu" (§22.6)
+            for r in rows:
+                if r.window_purpose is not None:
+                    running.setdefault((r.host_device_id, r.host_dropped_at or utcnow()), []).append(r.chat_id)
             if rows:
                 # ssq como se fosse chat a chat: queda e, logo depois, a concessão da troca pendente
                 s = await next_ssq(conn, user_id, len(rows) + sum(1 for r in rows if r.handover_to is not None))
@@ -866,6 +882,9 @@ class Coordinator:
                 {"u": user_id, "t": limit},
             )
         self._run(post)
+        if self.push is not None:
+            for (device_id, dropped_at), chat_ids in running.items():
+                self.push.host_dropped(user_id, device_id, chat_ids, dropped_at)
         if nxt is not None:
             self._schedule_sweep("grace", user_id, (nxt - utcnow()).total_seconds())
 
@@ -958,11 +977,15 @@ class Coordinator:
                 pc.timer.cancel()
         for d in [d for d, (u, _) in self.pending_revocations.items() if u == user_id]:
             del self.pending_revocations[d]
+        if self.push is not None:
+            self.push.forget_user(user_id)
 
     def forget_devices(self, device_ids: list[uuid.UUID]) -> None:
         """Dispositivos revogados nunca mais conectam: os host.revoked guardados para eles saem."""
         for d in device_ids:
             self.pending_revocations.pop(d, None)
+        if self.push is not None:
+            self.push.forget_devices(device_ids)
 
     # ------------------------------------------------------------------ comandos remotos (§8.6)
     def _track(self, user_id: uuid.UUID, cmd_id: str, chat_id: str, sender: uuid.UUID, host: uuid.UUID) -> None:

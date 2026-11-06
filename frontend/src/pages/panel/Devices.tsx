@@ -146,6 +146,7 @@ export default function Devices() {
                   <p className="truncate text-[15px] font-medium">{d.name}</p>
                   {d.current && <Badge tone="accent">este dispositivo</Badge>}
                   {d.online && !d.current && <Badge tone="success">online</Badge>}
+                  {d.push && <Badge>notificações</Badge>}
                 </div>
                 <p className="mt-0.5 text-[12.5px] text-subtle">
                   {CLIENT[d.client] ?? d.client} · {PLATFORM[d.platform] ?? d.platform}

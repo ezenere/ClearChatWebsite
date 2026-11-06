@@ -13,6 +13,8 @@ export interface InstanceInfo {
     captcha: { provider: 'turnstile'; siteKey: string } | null
     landing: boolean
     gateway: boolean
+    /** Notificações push (desde 1.7.0); null = instância sem push. */
+    push?: { providers: string[] } | null
   }
   links: { download?: string; signup?: string }
 }
@@ -82,6 +84,8 @@ export interface DeviceInfo {
   last_ip: string | null
   online: boolean
   current: boolean
+  /** Tem token de push (recebe notificações no celular; desde 1.7.0). */
+  push?: boolean
 }
 
 export interface Change {

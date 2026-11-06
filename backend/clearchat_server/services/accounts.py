@@ -94,7 +94,8 @@ async def revoke_devices(
         return [], []
     await execute(
         conn,
-        "UPDATE devices SET revoked_at = now(), refresh_hash = NULL, refresh_expires_at = NULL "
+        "UPDATE devices SET revoked_at = now(), refresh_hash = NULL, refresh_expires_at = NULL, "
+        "push_token = NULL, push_provider = NULL, offline_push_shown = false "
         "WHERE id = ANY(CAST(:d AS uuid[]))",
         {"d": ids},
     )

@@ -38,6 +38,7 @@ STATUS: dict[str, int] = {
     "protocol_unsupported": 426,
     "rate_limited": 429,
     "internal": 500,
+    "push_unavailable": 503,
 }
 
 MESSAGES: dict[str, str] = {
@@ -74,6 +75,7 @@ MESSAGES: dict[str, str] = {
     "protocol_unsupported": "Versão do protocolo incompatível.",
     "rate_limited": "Muitas tentativas. Aguarde e tente de novo.",
     "internal": "Erro interno.",
+    "push_unavailable": "Notificações push não estão configuradas nesta instância.",
 }
 
 

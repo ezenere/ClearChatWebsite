@@ -97,6 +97,18 @@ class Settings(BaseSettings):
     # (muitos logins seguidos do mesmo IP) caber numa hora. Bloqueios por falha não mudam.
     rate_limit_multiplier: int = Field(default=1, ge=1)
 
+    # notificações push (§22): JSON da conta de serviço do Firebase (vazio = push desligado na instância,
+    # features.push = null). O arquivo é segredo: fora do repositório, montado só leitura no container.
+    fcm_service_account_file: str = ""
+    # base da API do FCM (testes apontam para um FCM falso); o endpoint de token vem do `token_uri` do JSON
+    fcm_base_url: str = "https://fcm.googleapis.com"
+    fcm_timeout_s: float = 5
+    # envios ao FCM em paralelo (todo o processo)
+    fcm_max_concurrency: int = Field(default=16, ge=1)
+    # aviso "host caiu" (§22.6, §17.1): espera offline seguida e intervalo mínimo por dispositivo host
+    host_offline_push_delay_s: float = 120
+    host_offline_push_cooldown_s: float = 1800
+
     log_level: str = "info"
     log_format: Literal["json", "text"] = "json"
     # desliga os jobs periódicos (testes chamam o GC na mão)

@@ -52,5 +52,10 @@ cd docs/test-vectors && npm install && node generate.ts --check   # Node ≥ 22.
 ## Deploy e self-host
 
 Ver [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §8 (produção atrás do Nginx) e §9 (início rápido de
-self-host: `docker compose --profile edge up -d`, criar admin, desligar o cadastro aberto). O painel
+self-host: `docker compose --profile edge up -d`, criar admin, desligar o cadastro aberto).
+
+**Notificações push (opcional, protocolo 1.7.0):** o JSON da conta de serviço do Firebase fica numa pasta
+fora do git (`secrets/`, montada só leitura em `/run/secrets/clearchat`) e o `.env` aponta para ele com
+`FCM_SERVICE_ACCOUNT_FILE=/run/secrets/clearchat/<arquivo>.json`. Sem isso a instância funciona sem push
+(`features.push = null`). Passo a passo em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §8.0. O painel
 admin nunca é exposto: só `127.0.0.1`, acesso por túnel SSH.

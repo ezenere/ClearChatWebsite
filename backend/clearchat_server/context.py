@@ -15,6 +15,7 @@ from .mail import Mailer
 from .ratelimit import RateLimiter
 
 if TYPE_CHECKING:
+    from .push.service import PushService
     from .realtime.coordinator import Coordinator
     from .realtime.hub import Hub
     from .sync.blobs import BlobStore
@@ -31,6 +32,7 @@ class AppContext:
     hub: Hub
     coordinator: Coordinator
     blobs: BlobStore
+    push: PushService
 
 
 def get_ctx(request: Request) -> AppContext:

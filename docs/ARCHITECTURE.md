@@ -65,6 +65,7 @@ backend/            Python (pacote clearchat_server): app FastAPI da api
     ratelimit/        # contadores Postgres, bloqueios
     mail/             # SMTP (aiosmtplib) / console / memória + textos pt-BR
     instance/         # configurações da instância (/api/info)
+    push/             # notificações push (§22): token do dispositivo, POST /push, cliente FCM HTTP v1, aviso "host caiu"
     services/         # operações de conta compartilhadas com o admin (revogar, banir, apagar, convites)
     jobs/             # GC e expirações + ouvinte LISTEN/NOTIFY dos eventos do admin
   tests/              # pytest (Postgres real, uvicorn em processo, WebSocket de verdade)
@@ -162,7 +163,13 @@ CREATE TABLE devices (
   revoked_at     timestamptz,
   refresh_hash   bytea UNIQUE,                 -- refresh atual
   refresh_prev_hash bytea,                     -- anterior (legado; a detecção usa o histórico abaixo)
-  refresh_expires_at timestamptz
+  refresh_expires_at timestamptz,
+  -- push (SYNC_PROTOCOL §22, migração 0003): um token por dispositivo; um token pertence a um dispositivo só
+  push_provider  text CHECK (push_provider IN ('fcm','apns')),
+  push_token     text CHECK (char_length(push_token) BETWEEN 1 AND 4096),   -- UNIQUE parcial (não nulo)
+  push_updated_at timestamptz,
+  -- aviso "host caiu" (§22.6): tag fixa por host, último aviso (intervalo mínimo) e se há aviso a apagar
+  offline_push_tag text, offline_push_at timestamptz, offline_push_shown boolean NOT NULL DEFAULT false
 );
 CREATE INDEX ON devices (user_id) WHERE revoked_at IS NULL;
 
@@ -374,6 +381,24 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
   SQLAlchemy usa `hide_parameters=True` (erros sem os valores dos parâmetros). Exceção consciente:
   `MAIL_BACKEND=console` (desenvolvimento, só se escolhido explicitamente) escreve o e-mail inteiro, com o
   código, no log.
+- **Push** (`push/`, SYNC_PROTOCOL §22): `PUT`/`DELETE /devices/current/push` guardam o token FCM em
+  `devices.push_token` (registrar um token que já está noutro dispositivo tira de lá — app reinstalado ou
+  noutra conta); revogar/logout apaga. `POST /push` valida (`kind`, `tag` 32 hex, `to` "all" ou ≤ 20 ids,
+  envelope ≤ 2048 bytes, `dismiss` sem envelope), limita (120/h por dispositivo, 300/h por conta), responde
+  `{sent: n}` (destinos com token) **sem esperar o FCM** e repassa em tarefas asyncio (em paralelo, até
+  `FCM_MAX_CONCURRENCY`, timeout `FCM_TIMEOUT_S` por fase e 3× isso no total). Cliente FCM HTTP v1 próprio
+  (`push/fcm.py`): JWT RS256 da conta de serviço assinado com `cryptography`, trocado no `token_uri` por um
+  access token em cache até 5 min antes de expirar (um `401` renova e tenta uma vez); mensagem só de dados
+  (`v`, `kind`, `tag`, `env`, `sent_at`), `android.collapse_key = tag`, prioridade/TTL por kind. Resposta
+  `UNREGISTERED`/`404`/`INVALID_ARGUMENT` em `message.token` apaga o token (só se ainda for o mesmo); outros
+  erros só vão ao log. Sem `FCM_SERVICE_ACCOUNT_FILE` (ou com o arquivo inválido — vai ao log) a instância
+  fica sem push: `features.push = null` e `POST /push` → `503 push_unavailable`.
+- **Aviso "host caiu"** (§22.6): o fim da tolerância de um host com chats rodando agenda (em memória) um
+  timer para `host_dropped_at + HOST_OFFLINE_PUSH_DELAY_S` (120 s); o host reconectar ou ser revogado
+  cancela. No disparo: o dispositivo ainda é o host de um desses chats e continua fora, e o último aviso
+  dele (`offline_push_at`) foi há mais de `HOST_OFFLINE_PUSH_COOLDOWN_S` (30 min) → `host_offline` com a tag
+  fixa do dispositivo (`offline_push_tag`) a todos os outros com token. Na volta, `dismiss` dessa tag se o
+  aviso foi mostrado. Um reinício do servidor perde os timers em andamento (aviso de melhor esforço).
 - **CORS**: só com `ALLOWED_ORIGINS` (lista exata, com credenciais); `*` é recusado na subida.
 
 ### 4.1 Lacunas do contrato
@@ -483,6 +508,25 @@ padrão `172.31.250.0/24`) e `TRUSTED_PROXY_CIDRS=127.0.0.1/32,172.31.250.1/32,1
 daí. (Em self-host com o proxy em outra máquina: `BIND_ADDR` = interface da LAN e
 o IP do proxy em `TRUSTED_PROXY_CIDRS`.)
 
+### 8.0 Notificações push (opcional)
+
+1. Firebase Console → projeto do app → Configurações do projeto → **Contas de serviço** → "Gerar nova
+   chave privada" (um JSON). O app mobile tem de ser do mesmo projeto Firebase.
+2. No servidor, guarde o JSON fora do git, numa pasta só sua, legível pelo usuário do container (uid 10001):
+   ```bash
+   mkdir -p secrets && chmod 700 secrets          # secrets/ está no .gitignore
+   cp ~/clearchat-firebase-adminsdk.json secrets/ # (scp do seu computador)
+   sudo chown 10001 secrets/clearchat-firebase-adminsdk.json && sudo chmod 400 secrets/clearchat-firebase-adminsdk.json
+   ```
+3. No `.env`: `FCM_SERVICE_ACCOUNT_FILE=/run/secrets/clearchat/clearchat-firebase-adminsdk.json` (o compose
+   monta `PUSH_SECRETS_DIR`, padrão `./secrets`, em `/run/secrets/clearchat`, só leitura).
+4. `docker compose up -d api` e confira: `curl -s http://127.0.0.1:8100/api/info` deve ter
+   `"push": {"providers": ["fcm"]}`. Arquivo ausente/inválido → `push` nulo e o motivo no log da api
+   (`push desligado: …`); o resto do servidor funciona normalmente.
+
+O servidor nunca vê o conteúdo dos avisos (cifrado com `K_push` no host); só tokens, tipo, tag, destinos e
+horário. Não há saída para outro lugar além de `oauth2.googleapis.com` e `fcm.googleapis.com`.
+
 ### 8.1 Nginx (exemplo — `deploy/nginx.example.conf`)
 
 ```nginx
@@ -585,6 +629,7 @@ cp .env.example .env
 #   SERVER_SECRET, ADMIN_TOKEN, POSTGRES_PASSWORD  → openssl rand -base64 48
 #   SMTP_*                                         → seu servidor de e-mail (códigos de login)
 #   TURNSTILE_* vazios                             → sem captcha (rate limit continua)
+#   FCM_SERVICE_ACCOUNT_FILE vazio                 → sem notificações push (ver §8.0 para ligar)
 #   TRUSTED_PROXY_CIDRS                            → deixe o padrão (inclui o Caddy do edge, EDGE_IP);
 #                                                    proxy próprio em outra máquina? acrescente o IP dele
 docker compose --profile edge up -d --build        # perfil "edge": um proxy Caddy numa porta só (EDGE_PORT)
@@ -618,7 +663,13 @@ make check                     # ruff + mypy + testes
 Os testes sobem a api de verdade (uvicorn numa porta livre) contra um Postgres real, com timers do
 protocolo encurtados (tolerância 0,5 s, troca forçada 0,6 s, timeout de comando 0,6 s), e cobrem auth,
 sessões, chaves, push/pull, blobs, WebSocket, host/comandos/stream, divergência e o painel admin.
-Turnstile é testado com um transporte httpx falso (sem rede).
+Turnstile é testado com um transporte httpx falso (sem rede); o push (`tests/test_push.py`) com um FCM e
+um endpoint OAuth2 falsos no mesmo transporte (conta de serviço com chave RSA gerada no teste, JWT
+conferido), inclusive a histerese do aviso "host caiu".
+
+Push com o FCM de verdade em desenvolvimento: `FCM_SERVICE_ACCOUNT_FILE=/caminho/do/json make dev` (o
+`/api/info` passa a anunciar `features.push`). Para apontar a um FCM falso: `FCM_BASE_URL=http://127.0.0.1:porta`
+e um JSON de conta de serviço cujo `token_uri` aponte para o endpoint OAuth2 falso.
 
 Site (`frontend/`): `npm run test` (unitários, inclusive os vetores de cripto), `npm run test:e2e`
 (Playwright contra a API simulada de `src/mock`) e o **E2E de integração contra o backend real**

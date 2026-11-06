@@ -107,6 +107,7 @@ async def list_devices(p: Principal = Depends(current_principal), ctx: AppContex
             "last_ip": str(r.last_ip) if r.last_ip is not None else None,
             "online": ctx.hub.is_online(r.id),
             "current": r.id == p.device_id,
+            "push": r.push_token is not None,
         }
         for r in rows
     ]
