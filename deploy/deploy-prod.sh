@@ -57,13 +57,14 @@ ssh "$TARGET" "umask 077 && cat > '$DIR/.incoming/$KEY_NAME'" < "$FCM_KEY_FILE"
 echo "→ backup, troca do código e subida"
 ssh "$TARGET" "DIR='$DIR' KEY_NAME='$KEY_NAME' CONTACT='$CONTACT' bash -s" <<'REMOTE'
 set -euo pipefail
+# os comandos docker recebem </dev/null: este script chega pela entrada padrão (bash -s)
 cd "$DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 B=".backups/$TS"
 mkdir -p "$B"
 chmod 700 .backups
 
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$B/db.dump"
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' < /dev/null > "$B/db.dump"
 [[ -s "$B/db.dump" ]] || { echo "pg_dump vazio — abortando sem mexer em nada" >&2; exit 1; }
 tar -czf "$B/tree.tgz" --exclude=./.backups --exclude=./secrets --exclude=./.incoming .
 echo "backup: $DIR/$B ($(du -sh "$B" | cut -f1))"
@@ -78,7 +79,7 @@ mv -f ".incoming/$KEY_NAME" "secrets/$KEY_NAME"
 rmdir .incoming
 # o container roda como uid 10001; ajusta o dono por um container descartável (a imagem já está aqui)
 docker run --rm -v "$PWD/secrets:/s" --entrypoint sh postgres:17-alpine \
-  -c "chown 10001 '/s/$KEY_NAME' && chmod 400 '/s/$KEY_NAME'"
+  -c "chown 10001 '/s/$KEY_NAME' && chmod 400 '/s/$KEY_NAME'" < /dev/null
 
 set_env() {  # set_env NOME VALOR [só_se_ausente]
   if grep -q "^$1=" .env; then
@@ -91,7 +92,7 @@ set_env() {  # set_env NOME VALOR [só_se_ausente]
 set_env FCM_SERVICE_ACCOUNT_FILE "/run/secrets/clearchat/$KEY_NAME"
 set_env PRIVACY_CONTACT_EMAIL "$CONTACT" only-if-missing
 
-docker compose up -d --build 2>&1 | tail -15
+docker compose up -d --build < /dev/null 2>&1 | tail -15
 for i in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8100/api/info > /tmp/clearchat-info.json 2>/dev/null; then break; fi
   sleep 2
