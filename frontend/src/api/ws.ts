@@ -1,5 +1,7 @@
 // WebSocket do protocolo (SYNC_PROTOCOL.md §10) — o site só usa as notificações de registros
-// (`sync.changes`) e de chaves/conta para atualizar as listas. Sem stream ao vivo nem comandos remotos.
+// (`sync.changes`), de chaves/conta para atualizar as listas e, desde 1.8.0, a lista dos chats só ao
+// vivo (§23.4: `live.list` depois de cada `welcome` + `live.*`). Sem stream ao vivo nem comandos remotos.
+import type { LiveChatWire } from '../data/liveChats'
 import type { Change } from './types'
 
 /** O mínimo da API do WebSocket que usamos (permite injetar o mock). */
@@ -19,7 +21,22 @@ export type SyncEvent =
   | { t: 'keys.changed'; keys_rev: number }
   | { t: 'keys.reset' }
   | { t: 'account.deleted' }
-  | { t: 'welcome'; head: number; keys_rev: number; device_id: string; user_id: string }
+  | {
+      t: 'welcome'
+      head: number
+      keys_rev: number
+      device_id: string
+      user_id: string
+      caps?: string[]
+    }
+  // resposta do `live.list` pedido logo depois do welcome (o ack substitui a lista inteira)
+  | { t: 'live.list'; chats: LiveChatWire[]; settling_s: number }
+  | { t: 'live.update'; chats: LiveChatWire[] }
+  | { t: 'live.removed'; host_device_id: string; chat_ids: string[]; reason: string }
+  | { t: 'live.host'; host_device_id: string; status: 'online' | 'grace' }
+
+/** Capacidades opcionais declaradas no hello (§10.3). */
+export const CLIENT_CAPS = ['live_chats'] as const
 
 /**
  * idle: nunca iniciado · connecting: abrindo/esperando o `welcome` · online: `welcome` recebido ·
@@ -56,6 +73,8 @@ export class SyncSocket {
   /** 4401 seguidos sem `welcome` no meio (evita laço refresh → 4401 → refresh sem pausa). */
   private authFailures = 0
   private reqId = 0
+  /** `id` do `live.list` em voo: eventos `live.*` antes do ack são descartados (já vêm nele, §23.4). */
+  private liveListId: string | null = null
   private stopped = true
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
@@ -177,7 +196,8 @@ export class SyncSocket {
             cursor: 0,
             state_cursor: 0,
             active_windows: [],
-            subscriptions: []
+            subscriptions: [],
+            caps: CLIENT_CAPS
           })
         )
       } catch {
@@ -219,6 +239,32 @@ export class SyncSocket {
         // zera o backoff só depois de 60 s conectado (§10.2)
         this.stableTimer = setTimeout(() => (this.attempt = 0), 60_000)
         this.opts.onEvent(msg as unknown as SyncEvent)
+        this.liveListId = null
+        if (Array.isArray(msg.caps) && msg.caps.includes('live_chats')) {
+          this.liveListId = this.nextId()
+          try {
+            this.ws?.send(JSON.stringify({ t: 'live.list', id: this.liveListId }))
+          } catch {
+            this.liveListId = null
+          }
+        }
+        break
+      case 'ack':
+      case 'error':
+        if (this.liveListId !== null && msg.re === this.liveListId) {
+          this.liveListId = null
+          if (msg.t === 'ack')
+            this.opts.onEvent({
+              t: 'live.list',
+              chats: Array.isArray(msg.chats) ? (msg.chats as LiveChatWire[]) : [],
+              settling_s: typeof msg.settling_s === 'number' ? msg.settling_s : 0
+            })
+        }
+        break
+      case 'live.update':
+      case 'live.removed':
+      case 'live.host':
+        if (this.liveListId === null) this.opts.onEvent(msg as unknown as SyncEvent)
         break
       case 'pong':
         if (this.pongTimer) clearTimeout(this.pongTimer)
@@ -257,6 +303,7 @@ export class SyncSocket {
   private onClose(code: number): void {
     this.clearTimers()
     this.ws = null
+    this.liveListId = null
     this.lastCloseCode = code
     if (this.stopped) return
     if (TERMINAL_CLOSE_CODES.includes(code)) {

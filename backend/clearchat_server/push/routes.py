@@ -113,5 +113,5 @@ async def send_push(
             raise ApiError("payload_too_large", details={"field": "env", "limit": PUSH_MAX_ENV_BYTES})
     async with ctx.engine.connect() as conn:
         targets = await push_targets(conn, p.user_id, p.device_id, to)
-    push.dispatch(targets, kind, tag, env_s)
+    push.dispatch(targets, kind, tag, env_s, from_device=p.device_id)
     return {"sent": len(targets)}

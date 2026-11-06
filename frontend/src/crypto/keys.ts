@@ -56,6 +56,15 @@ export const aadCommand = (userId: string, chatId: string, cmdId: string): Bytes
 export const aadCommandResult = (userId: string, chatId: string, cmdId: string): Bytes =>
   utf8(`clearchat|v1|command-result|${userId}|${chatId}|${cmdId}`)
 
+/** Anúncio de chat só ao vivo (desde 1.8.0, §3.10, §23.4): amarra host, chat, epoch ao vivo e revisão. */
+export const aadLiveAnnounce = (
+  userId: string,
+  hostDeviceId: string,
+  chatId: string,
+  epoch: number,
+  arev: number
+): Bytes => utf8(`clearchat|v1|live-announce|${userId}|${hostDeviceId}|${chatId}|${epoch}|${arev}`)
+
 export const aadBlob = (userId: string, blobId: string, header: Uint8Array): Bytes =>
   concat(utf8(`clearchat|v1|blob|${userId}|${blobId}|`), header)
 

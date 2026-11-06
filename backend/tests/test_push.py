@@ -227,7 +227,7 @@ async def test_bad_service_account_disables_push(make_server, tmp_path):
 async def test_info_and_token_registration(psrv):
     r = await psrv.http.get("/api/info")
     assert r.json()["features"]["push"] == {"providers": ["fcm"]}
-    assert r.json()["protocol"]["version"] == "1.7.0"
+    assert r.json()["protocol"]["version"] == "1.8.0"
     pc = await psrv.signup()
     phone = await psrv.login(pc.email, client="mobile", can_host=False, name="Celular")
     devs = await devices(psrv, pc)
@@ -305,7 +305,10 @@ async def test_fanout_message_shape(psrv, fcm):
     assert set(m) == {"token", "data", "android"}
     assert m["android"] == {"collapse_key": TAG, "priority": "high", "ttl": "3600s"}
     d = m["data"]
-    assert set(d) == {"v", "kind", "tag", "env", "sent_at"} and all(isinstance(v, str) for v in d.values())
+    assert set(d) == {"v", "kind", "tag", "env", "sent_at", "from_device_id"}
+    assert all(isinstance(v, str) for v in d.values())
+    # desde 1.8.0: o servidor põe o dispositivo autenticado que enviou (o host do chat)
+    assert d["from_device_id"] == pc.device_id
     assert d["v"] == "1" and d["kind"] == "approval" and d["tag"] == TAG
     assert json.loads(d["env"]) == e
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", d["sent_at"])
@@ -551,6 +554,8 @@ async def test_host_offline_flapping_then_long_drop(hsrv, fcm):
     assert m["token"] == "tok-phone"
     d = m["data"]
     assert d["env"] == "" and d["chat_id"] == "c1" and d["device_name"] == "PC" and d["v"] == "1"
+    # desde 1.8.0: o host que caiu, em claro (o celular limpa as pendências dele, §22.7)
+    assert d["device_id"] == host.device_id and d["from_device_id"] == host.device_id
     assert re.fullmatch(r"[0-9a-f]{32}", d["tag"])
     assert m["android"] == {"collapse_key": d["tag"], "priority": "high", "ttl": "3600s"}
     await asyncio.sleep(1.2)
@@ -612,3 +617,66 @@ async def test_host_offline_without_push_targets_or_revoked(hsrv, fcm):
     await asyncio.sleep(1.0)
     await hsrv.ctx.push.drain()
     assert fcm.messages == []
+
+
+# ---------------------------------------------------------------- chats só ao vivo (§22.6, desde 1.8.0)
+
+LIVE_EPOCH = 1793923200000
+
+
+def live_item(chat_id: str, running: bool, arev: int = 1) -> dict[str, Any]:
+    return {"chat_id": chat_id, "epoch": LIVE_EPOCH, "arev": arev, "running": running, "env": env(60)}
+
+
+async def live_host(srv: Any) -> tuple[Any, Any, Any]:
+    host = await srv.signup(name="Ana")
+    phone = await srv.login(host.email, client="mobile", can_host=False, name="Celular")
+    await register(srv, phone, "tok-phone")
+    ch, _ = await srv.ws(host, caps=["live_chats"])
+    return host, phone, ch
+
+
+async def test_host_offline_counts_running_live_chat(hsrv, fcm):
+    host, phone, ch = await live_host(hsrv)
+    await ch.ack("live.announce", full=True, chats=[live_item("lv1", True), live_item("lv2", False)])
+    await drop(hsrv, ch)
+    (m,) = await wait_kind(fcm, "host_offline")
+    d = m["data"]
+    assert d["chat_id"] == "lv1" and d["device_id"] == host.device_id and d["from_device_id"] == host.device_id
+    assert hsrv.ctx.coordinator.live.bindings == {}  # o vínculo some ao fim da tolerância
+    # volta → dismiss (com o host em from_device_id)
+    await hsrv.ws(host, caps=["live_chats"])
+    (dm,) = await wait_kind(fcm, "dismiss")
+    assert dm["data"]["tag"] == d["tag"] and dm["data"]["from_device_id"] == host.device_id
+
+
+async def test_host_offline_live_not_running_or_back_in_time(hsrv, fcm):
+    host, phone, ch = await live_host(hsrv)
+    await ch.ack("live.announce", full=True, chats=[live_item("lv1", True)])
+    await ch.ack("live.announce", full=False, chats=[live_item("lv1", False, arev=2)])
+    await drop(hsrv, ch)
+    await asyncio.sleep(1.6)
+    await hsrv.ctx.push.drain()
+    assert fcm.messages == []
+    # rodando, mas volta antes da espera do aviso
+    ch, _ = await hsrv.ws(host, caps=["live_chats"])
+    await ch.ack("live.announce", full=True, chats=[live_item("lv1", True, arev=3)])
+    await drop(hsrv, ch)
+    await asyncio.sleep(0.6)
+    await hsrv.ws(host, caps=["live_chats"])
+    await asyncio.sleep(1.0)
+    await hsrv.ctx.push.drain()
+    assert fcm.kinds("host_offline") == []
+
+
+async def test_host_offline_prefers_online_chat(hsrv, fcm):
+    host, phone, ch = await host_setup(hsrv)
+    await ch.close()
+    ch, _ = await hsrv.ws(host, caps=["live_chats"])
+    await ch.ack("host.begin", chat_id="c1", epoch=1, purpose="run")
+    await ch.ack("live.announce", full=True, chats=[live_item("a0", True)])
+    await drop(hsrv, ch)
+    (m,) = await wait_kind(fcm, "host_offline")
+    assert m["data"]["chat_id"] == "c1" and m["data"]["device_id"] == host.device_id
+    await asyncio.sleep(0.5)
+    assert len(fcm.kinds("host_offline")) == 1

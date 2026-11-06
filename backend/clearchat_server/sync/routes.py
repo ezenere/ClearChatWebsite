@@ -29,11 +29,16 @@ def payload_flag(v: Any) -> bool:
     return str(v).lower() not in ("0", "false", "no")
 
 
-async def after_push(ctx: AppContext, user_id: uuid.UUID, outcome: records.PushOutcome) -> None:
+async def after_push(
+    ctx: AppContext, user_id: uuid.UUID, outcome: records.PushOutcome, device_id: uuid.UUID | None = None
+) -> None:
     """Depois do COMMIT: `sync.changes` para todas as conexões do usuário e `chat.state` dos chats que
-    mudaram de host."""
+    mudaram de host. Um registro `chat` criado pelo host de um chat só ao vivo apaga o vínculo
+    (`live.removed saved_online`, §23.8)."""
     if outcome.replayed or not outcome.changes:
         return
+    if device_id is not None:
+        ctx.coordinator.live.after_push(user_id, device_id, outcome.changes)
     ctx.hub.send_user(
         user_id,
         {"t": "sync.changes", "changes": records.limit_inline(outcome.changes), "head": outcome.response["head"]},
@@ -80,6 +85,7 @@ async def sync_push(
     request: Request, p: Principal = Depends(current_principal), ctx: AppContext = Depends(get_ctx)
 ) -> Any:
     body = await _json_body(request, PUSH_MAX_BYTES)
+    ctx.coordinator.live.check_push(p.user_id, p.device_id, body)
     try:
         outcome = await records.push(
             ctx.engine,
@@ -94,7 +100,7 @@ async def sync_push(
         for st in e.broadcast:
             ctx.coordinator.broadcast_state(p.user_id, st)
         raise
-    await after_push(ctx, p.user_id, outcome)
+    await after_push(ctx, p.user_id, outcome, p.device_id)
     return outcome.response
 
 
@@ -143,6 +149,7 @@ async def divergence_resolve(
 ) -> Any:
     if not RECORD_ID_RE.match(chat_id):
         raise ApiError("invalid_request", details={"field": "chat_id"})
+    ctx.coordinator.live.assert_unbound(p.user_id, chat_id)
     body = await _json_body(request, PUSH_MAX_BYTES)
     out = await records.resolve_divergence(
         ctx.engine,

@@ -36,6 +36,7 @@ from ..errors import ApiError
 from ..sync.envelope import parse_envelope
 from ..util import RECORD_ID_RE, iso, utcnow
 from .hub import Conn, Hub
+from .live import LIVE_ONLY_KINDS, LiveRegistry
 
 if TYPE_CHECKING:
     from ..push.service import PushService
@@ -67,6 +68,9 @@ COMMAND_KINDS = {
     # crus em base64 → ~0,7 MiB de envelope, abaixo de COMMAND_MAX_BYTES)
     "fs.list",
     "fs.read",
+    # desde 1.8.0: só chats com vínculo ao vivo (§23.5, §23.7) — histórico sob demanda, renomear/editar,
+    # anexos em pedaços pelo host (nada vira blob)
+    *LIVE_ONLY_KINDS,
 }
 # teto do envelope de remote.send, remote.result e host.release.forwarded[] (SYNC_PROTOCOL §17.1)
 COMMAND_MAX_BYTES = 1024 * 1024
@@ -178,6 +182,8 @@ class Coordinator:
         self._closing = False
         # notificações push (§22.6, aviso "host caiu"); ligado pela aplicação depois de criar os dois
         self.push: PushService | None = None
+        # chats só ao vivo (§23): vínculos em memória, consultados antes de chat_states
+        self.live = LiveRegistry(engine, hub, settings, lambda: self.push)
 
     # ------------------------------------------------------------------ utilidades
     def broadcast_state(self, user_id: uuid.UUID, state: dict[str, Any]) -> None:
@@ -374,6 +380,7 @@ class Coordinator:
         purpose = data.get("purpose")
         if purpose not in PURPOSES:
             raise ApiError("invalid_request", details={"field": "purpose"})
+        self.live.assert_unbound(c.user_id, chat_id)
         post: Post = []
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
@@ -458,6 +465,7 @@ class Coordinator:
         if mode not in TAKEOVER_MODES:
             raise ApiError("invalid_request", details={"field": "mode"})
         confirm = data.get("confirm_pinned") is True
+        self.live.assert_unbound(c.user_id, chat_id)
         post: Post = []
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
@@ -613,6 +621,7 @@ class Coordinator:
         pinned = data.get("pinned")
         if not isinstance(pinned, bool):
             raise ApiError("invalid_request", details={"field": "pinned"})
+        self.live.assert_unbound(c.user_id, chat_id)
         async with self.engine.begin() as conn:
             await lock_user(conn, c.user_id)
             await self._ensure(conn, c.user_id, chat_id)
@@ -775,6 +784,7 @@ class Coordinator:
         for key, pc in list(self.pending.items()):
             if pc.host == c.device_id and pc.user_id == c.user_id:
                 self._fail(key, "host_offline")
+        self.live.on_disconnect(c)
         grace = self.settings.host_drop_grace_s
         rows: list[Any] = []
         async with self.engine.begin() as conn:
@@ -954,6 +964,7 @@ class Coordinator:
 
     async def shutdown(self) -> None:
         self._closing = True
+        self.live.shutdown()
         for timers in (self.grace_timers, self.force_timers):
             for t in timers.values():
                 t.cancel()
@@ -977,6 +988,7 @@ class Coordinator:
                 pc.timer.cancel()
         for d in [d for d, (u, _) in self.pending_revocations.items() if u == user_id]:
             del self.pending_revocations[d]
+        self.live.forget_user(user_id)
         if self.push is not None:
             self.push.forget_user(user_id)
 
@@ -984,6 +996,7 @@ class Coordinator:
         """Dispositivos revogados nunca mais conectam: os host.revoked guardados para eles saem."""
         for d in device_ids:
             self.pending_revocations.pop(d, None)
+        self.live.forget_devices(device_ids)
         if self.push is not None:
             self.push.forget_devices(device_ids)
 
@@ -1025,8 +1038,20 @@ class Coordinator:
             raise ApiError("invalid_request", details={"field": "kind"})
         _env_size_ok(data.get("env"), COMMAND_MAX_BYTES)
         env = parse_envelope(data.get("env"), "env")
+        # chat só ao vivo (§23.3, §23.7): o vínculo em memória vem antes de chat_states (host online →
+        # entrega; em tolerância → host_offline; nunca chat_diverged)
+        binding = self.live.get(c.user_id, chat_id)
+        if binding is None and kind in LIVE_ONLY_KINDS:
+            raise ApiError("invalid_request", details={"field": "kind", "reason": "not_live", "chat_id": chat_id})
         async with self.engine.connect() as conn:
             await self._assert_active(conn, c)
+            if binding is not None:
+                if binding.host_device_id == c.device_id:
+                    raise ApiError("invalid_request", details={"reason": "sender_is_host", "chat_id": chat_id})
+                host_conn = self.hub.get(binding.host_device_id)
+                if host_conn is None:
+                    raise ApiError("host_offline", details={"chat_id": chat_id, "live": True})
+                return self._relay(c, host_conn, chat_id, cmd_id, str(kind), env.to_json())
             st = await load_state(conn, c.user_id, chat_id)
             if st is not None and st.divergence_id is not None:
                 raise ApiError(
@@ -1040,6 +1065,11 @@ class Coordinator:
             host_conn = self.hub.get(st.host_device_id)
             if host_conn is None:
                 raise ApiError("host_offline", details={"chat_id": chat_id, "state": serialize(st, self.hub.is_online)})
+        return self._relay(c, host_conn, chat_id, cmd_id, str(kind), env.to_json())
+
+    def _relay(
+        self, c: Conn, host_conn: Conn, chat_id: str, cmd_id: str, kind: str, env: dict[str, Any]
+    ) -> dict[str, Any]:
         self._track(c.user_id, cmd_id, chat_id, c.device_id, host_conn.device_id)
         host_conn.send(
             {
@@ -1047,7 +1077,7 @@ class Coordinator:
                 "chat_id": chat_id,
                 "cmd_id": cmd_id,
                 "kind": kind,
-                "env": env.to_json(),
+                "env": env,
                 "from_device_id": str(c.device_id),
                 "created_at": iso(utcnow()),
             }
@@ -1097,10 +1127,16 @@ class Coordinator:
         rate = c.stream_rate
         if not _stream_rate_ok(rate, chat_id, time.monotonic()):
             return
-        # autorização (uma linha por chave primária) ANTES de guardar qualquer estado novo
-        st = await self._host_of(c.user_id, chat_id)
-        if st is None or st.host_device_id != c.device_id or int(st.epoch) != epoch:
-            return
+        # autorização ANTES de guardar qualquer estado novo: o vínculo ao vivo (memória, §23.6) ou uma
+        # linha de chat_states por chave primária
+        binding = self.live.get(c.user_id, chat_id)
+        if binding is not None:
+            if binding.host_device_id != c.device_id or binding.epoch != epoch:
+                return
+        else:
+            st = await self._host_of(c.user_id, chat_id)
+            if st is None or st.host_device_id != c.device_id or int(st.epoch) != epoch:
+                return
         now = time.monotonic()
         if not _stream_rate_ok(rate, chat_id, now):
             return
@@ -1126,11 +1162,16 @@ class Coordinator:
                 sub.send(msg)
 
     async def request_snapshot(self, c: Conn, chat_id: str) -> None:
-        st = await self._host_of(c.user_id, chat_id)
-        if st is None or st.host_device_id is None or st.host_device_id == c.device_id:
+        binding = self.live.get(c.user_id, chat_id)
+        if binding is not None:
+            host: uuid.UUID | None = binding.host_device_id
+        else:
+            st = await self._host_of(c.user_id, chat_id)
+            host = None if st is None else st.host_device_id
+        if host is None or host == c.device_id:
             return
         self.hub.send_device(
-            st.host_device_id,
+            host,
             {"t": "stream.resync_request", "chat_id": chat_id, "requester_device_id": str(c.device_id)},
         )
 

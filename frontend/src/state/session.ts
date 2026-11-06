@@ -10,6 +10,7 @@ import { type Bytes, deriveSubkeys, type Subkeys, unlockWithPassword } from '../
 import { Repo } from '../data/repo'
 import { kekInWorker } from '../lib/kdf'
 import { emitChanges, emitResync } from './live'
+import { useLiveChats } from './liveChats'
 
 export type Phase = 'boot' | 'anon' | 'needs_setup' | 'locked' | 'unlocked'
 
@@ -92,6 +93,7 @@ export const useSession = create<SessionState>((set, get) => {
         get().endSession('Sua sessão foi encerrada neste dispositivo.')
       },
       onEvent: (ev) => {
+        if (ev.t === 'welcome' || ev.t.startsWith('live.')) useLiveChats.getState().apply(ev)
         if (ev.t === 'welcome') {
           if (welcomed) emitResync()
           welcomed = true
@@ -110,6 +112,7 @@ export const useSession = create<SessionState>((set, get) => {
     socket?.stop()
     socket = null
     welcomed = false
+    useLiveChats.getState().clear()
   }
 
   return {

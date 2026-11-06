@@ -42,7 +42,9 @@ Decisões:
   comandos remotos em trânsito aguardando resultado) ficam em memória do processo, com o estado durável no Postgres. Escala de uma
   instância pessoal/pequena cabe com folga. Caminho futuro para vários workers: `LISTEN/NOTIFY` do
   Postgres para fan-out entre processos + timers baseados em colunas `*_deadline` varridas por job (o
-  esquema abaixo já guarda os deadlines).
+  esquema abaixo já guarda os deadlines). Os **vínculos dos chats só ao vivo** (SYNC_PROTOCOL §23) vivem
+  só na memória desse processo (é o que segura as conexões); vários workers precisariam de um lugar comum
+  em memória para eles (nunca o banco: o protocolo proíbe persistir).
 - **Sem Redis**: rate limit e contadores em Postgres (`INSERT … ON CONFLICT … RETURNING`).
 - **Sem CORS** por padrão (site na mesma origem; apps nativos não fazem CORS). `ALLOWED_ORIGINS` opcional.
 
@@ -61,7 +63,8 @@ backend/            Python (pacote clearchat_server): app FastAPI da api
     auth/             # códigos por e-mail, convites, tokens, dispositivos, conta, Turnstile
     keys/             # wraps, verifier, key_proof, reset
     sync/             # envelope (validação de formato), push/pull/divergência (records.py), blobs
-    realtime/         # hub WS (hub.py), coordenador de host + comandos + stream (coordinator.py), endpoint (ws.py)
+    realtime/         # hub WS (hub.py), coordenador de host + comandos + stream (coordinator.py), endpoint (ws.py),
+                      # chats só ao vivo — vínculos em memória, live.* (live.py)
     ratelimit/        # contadores Postgres, bloqueios
     mail/             # SMTP (aiosmtplib) / console / memória + textos pt-BR
     instance/         # configurações da instância (/api/info)
@@ -389,7 +392,8 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
   `FCM_MAX_CONCURRENCY`, timeout `FCM_TIMEOUT_S` por fase e 3× isso no total). Cliente FCM HTTP v1 próprio
   (`push/fcm.py`): JWT RS256 da conta de serviço assinado com `cryptography`, trocado no `token_uri` por um
   access token em cache até 5 min antes de expirar (um `401` renova e tenta uma vez); mensagem só de dados
-  (`v`, `kind`, `tag`, `env`, `sent_at`), `android.collapse_key = tag`, prioridade/TTL por kind. Resposta
+  (`v`, `kind`, `tag`, `env`, `sent_at` e, desde 1.8.0, `from_device_id` = o dispositivo que fez o
+  `POST /push`; nos avisos do servidor, o host que caiu), `android.collapse_key = tag`, prioridade/TTL por kind. Resposta
   `UNREGISTERED`/`404`/`INVALID_ARGUMENT` em `message.token` apaga o token (só se ainda for o mesmo); outros
   erros só vão ao log. Sem `FCM_SERVICE_ACCOUNT_FILE` (ou com o arquivo inválido — vai ao log) a instância
   fica sem push: `features.push = null` e `POST /push` → `503 push_unavailable`.
@@ -399,6 +403,26 @@ histórico de rotação do refresh, o índice `activity (kind, at DESC)` e as re
   dele (`offline_push_at`) foi há mais de `HOST_OFFLINE_PUSH_COOLDOWN_S` (30 min) → `host_offline` com a tag
   fixa do dispositivo (`offline_push_tag`) a todos os outros com token. Na volta, `dismiss` dessa tag se o
   aviso foi mostrado. Um reinício do servidor perde os timers em andamento (aviso de melhor esforço).
+  Desde 1.8.0 contam também os chats só ao vivo que estavam com `running: true` no último anúncio (guardado
+  em memória na queda; o vínculo some ao fim da tolerância), o `chat_id` é de preferência um chat online e
+  a mensagem leva `device_id` (o host que caiu) em claro.
+- **Chats só ao vivo** (`realtime/live.py`, SYNC_PROTOCOL §23): nada no banco. Por usuário, um vínculo em
+  memória por chat anunciado (`host`, `epoch` ao vivo, `arev`, `running`, envelope cifrado com K_stream —
+  nunca no log). `live.announce`/`live.withdraw` passam pela fila de requisições da conexão (em ordem com
+  os `sync.push` do host, para as conversões); `live.list`/`live.refresh` são só memória e respondem na
+  hora. Só conexões com `caps: ["live_chats"]` recebem `live.*` (menos a do próprio host). Queda do host →
+  `live.host grace` e, vencida `HOST_DROP_GRACE_S`, `live.removed host_dropped`; cada `welcome` de um host
+  com vínculos abre o mesmo prazo para reanunciar (o que não vier sai como `withdrawn`). `remote.send`,
+  `stream.subscribe`/`resync` e `stream.event` consultam o vínculo antes de `chat_states`;
+  `history.*`/`chat.update`/`attach.*` só valem com vínculo. Exclusividade (`409 live_conflict`): anúncio de
+  um chat com registro `chat` vivo ou `chat_states` (`exists_online`) ou de outro host (`other_host`);
+  `host.begin`/`takeover`/`pin`/`divergence/resolve` e push de outro dispositivo num chat vinculado
+  (`live`). Push do próprio host que cria o registro `chat` = "Salvar online": o vínculo some no commit
+  (`live.removed saved_online`). Tetos `LIVE_MAX_CHATS_PER_HOST`/`LIVE_MAX_CHATS_PER_USER` (500/1000) →
+  item `quota_exceeded` (`kind: live_chats`); taxa por conexão em memória (announce+withdraw 10/s, com
+  fechamento `4429` por abuso contínuo; `live.list` 10/min; `live.refresh` 6/min). `LIVE_CHATS_ENABLED=false`
+  desliga tudo (`features.liveChats: false`, o `welcome` não devolve a capacidade) — útil para testar os
+  apps contra um servidor sem suporte.
 - **CORS**: só com `ALLOWED_ORIGINS` (lista exata, com credenciais); `*` é recusado na subida.
 
 ### 4.1 Lacunas do contrato
@@ -469,7 +493,10 @@ Duas camadas:
   (definir senha de criptografia), `/unlock`, `/recover`, `/app` (painel), `/captcha`, `/captcha/done`.
 - Landing: apresenta o ClearChat (destaques do README do app, screenshots), downloads
   (`https://github.com/ezenere/ClearChatDesktop/releases`), "Criar conta" só com `signupOpen`.
-- Painel (tudo decifrado no navegador): conversas (listar/ver com markdown/apagar), provedores e chaves
+- Painel (tudo decifrado no navegador): conversas (listar/ver com markdown/apagar; desde 1.8.0, acima
+  delas, a contagem e a lista simples dos chats só ao vivo de outros dispositivos — título, host e status,
+  decifrados com K_stream, só em memória, sem abrir: `caps: ["live_chats"]` no hello, `live.list` depois de
+  cada `welcome` e os eventos `live.*`), provedores e chaves
   de busca (editar registros `provider` e `setting webSearchApiKeys`), trocar senha, recuperação, nova
   chave de recuperação, dispositivos (listar/renomear/revogar), apagar conta, "zerar criptografia".
 - Cripto: hash-wasm 4.12.0 (Argon2id) em Web Worker + WebCrypto; testes rodam os vetores de
@@ -666,6 +693,14 @@ sessões, chaves, push/pull, blobs, WebSocket, host/comandos/stream, divergênci
 Turnstile é testado com um transporte httpx falso (sem rede); o push (`tests/test_push.py`) com um FCM e
 um endpoint OAuth2 falsos no mesmo transporte (conta de serviço com chave RSA gerada no teste, JWT
 conferido), inclusive a histerese do aviso "host caiu".
+
+**Servidor local para os E2E dos apps** (sem push, sem segredos): `backend/scripts/dev-server.sh [--fast]
+[--reset] [--no-live] [--python <python>]` — usa o Postgres descartável `clearchat-backend-pytest`
+(127.0.0.1:55440) com um banco próprio (`DEV_DB`, padrão `clearchat_dev`), roda dentro de
+`~/.cache/clearchat-dev-server/<DEV_DB>` (não lê o `.env` do repositório), escreve os códigos de login no
+log (`MAIL_BACKEND=console`) e multiplica os limites de taxa. `--fast` encurta `HOST_DROP_GRACE_S` (3 s),
+`SERVER_RESTART_GRACE_S` (5 s) e `COMMAND_RESULT_TIMEOUT_S` (15 s); qualquer variável do servidor passada
+no ambiente vence. `--no-live` = instância sem chats só ao vivo.
 
 Push com o FCM de verdade em desenvolvimento: `FCM_SERVICE_ACCOUNT_FILE=/caminho/do/json make dev` (o
 `/api/info` passa a anunciar `features.push`). Para apontar a um FCM falso: `FCM_BASE_URL=http://127.0.0.1:porta`

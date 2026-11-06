@@ -45,6 +45,10 @@ class Conn:
         # chat_id → instantes dos últimos stream.event aceitos (janela de 1 s); só chats que esta conexão
         # hospeda, com teto de chaves (coordinator.STREAM_MAX_CHATS), e vai embora com a conexão
         self.stream_rate: dict[str, deque[float]] = {}
+        # capacidades opcionais aceitas no hello (§10.3; hoje só "live_chats") e limites de taxa dos
+        # frames live.* (§17.3), em memória, por conexão
+        self.caps: set[str] = set()
+        self.live_rate: dict[str, deque[float]] = {}
         self.last_frame_at = time.monotonic()
         self.closed = False
         self.revoked = False

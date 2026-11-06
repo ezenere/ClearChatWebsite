@@ -11,6 +11,7 @@ import { formatBytes, formatDateTime, relativeTime } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import { useLiveRefresh } from '../../state/live'
 import { useSession } from '../../state/session'
+import LiveChats from './LiveChats'
 import { PageHeader } from './PanelLayout'
 
 export default function Chats() {
@@ -75,6 +76,7 @@ export default function Chats() {
           {data.broken.length} conversa(s) não puderam ser decifradas ({data.broken[0].error}).
         </Alert>
       ) : null}
+      <LiveChats />
       {loading && !data ? (
         <div className="py-16 text-center">
           <Spinner label="Decifrando conversas…" />

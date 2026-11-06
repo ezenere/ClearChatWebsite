@@ -112,8 +112,9 @@ class PushService:
                 log.info("push ligado (FCM)", extra={"project_id": account.project_id})
         self._sem = asyncio.Semaphore(settings.fcm_max_concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
-        # (user_id, device_id do host) → timer do aviso "host caiu" + chats que rodavam na queda
-        self._offline: dict[tuple[uuid.UUID, uuid.UUID], tuple[asyncio.Task[None], set[str]]] = {}
+        # (user_id, device_id do host) → timer do aviso "host caiu" + chats online que rodavam na queda +
+        # chats só ao vivo que rodavam (§22.6: só em memória, da queda até a decisão)
+        self._offline: dict[tuple[uuid.UUID, uuid.UUID], tuple[asyncio.Task[None], set[str], set[str]]] = {}
         self._closing = False
 
     # ------------------------------------------------------------------ estado
@@ -134,7 +135,7 @@ class PushService:
 
     async def close(self) -> None:
         self._closing = True
-        for task, _ in self._offline.values():
+        for task, _, _ in self._offline.values():
             task.cancel()
         self._offline.clear()
         if self._tasks:
@@ -153,12 +154,22 @@ class PushService:
 
     # ------------------------------------------------------------------ envio
     def dispatch(
-        self, targets: list[Target], kind: str, tag: str, env_json: str, extra: dict[str, str] | None = None
+        self,
+        targets: list[Target],
+        kind: str,
+        tag: str,
+        env_json: str,
+        extra: dict[str, str] | None = None,
+        *,
+        from_device: uuid.UUID,
     ) -> None:
-        """Agenda o envio (não espera o FCM)."""
+        """Agenda o envio (não espera o FCM). `from_device` vai em `from_device_id` (desde 1.8.0, §22.3):
+        o dispositivo que fez o `POST /push` (o host do chat); nos avisos gerados pelo servidor, o host
+        que caiu."""
         if self.fcm is None or not targets:
             return
         sent_at = iso(utcnow()) or ""
+        extra = {**(extra or {}), "from_device_id": str(from_device)}
         self._spawn(self._deliver(targets, kind, tag, env_json, sent_at, extra))
 
     async def _deliver(
@@ -206,18 +217,29 @@ class PushService:
             log.exception("push: falha ao apagar token inválido")
 
     # ------------------------------------------------------------------ host caiu (§22.6)
-    def host_dropped(self, user_id: uuid.UUID, device_id: uuid.UUID, chat_ids: list[str], dropped_at: datetime) -> None:
+    def host_dropped(
+        self,
+        user_id: uuid.UUID,
+        device_id: uuid.UUID,
+        chat_ids: list[str],
+        dropped_at: datetime,
+        live_chat_ids: list[str] | None = None,
+    ) -> None:
         """Fim da tolerância de um host com chats rodando: agenda o aviso para `dropped_at +
         HOST_OFFLINE_PUSH_DELAY_S` (a queda conta desde que o WebSocket fechou). Várias varreduras da
-        mesma queda juntam os chats num timer só."""
-        if self.fcm is None or self._closing or not chat_ids:
+        mesma queda juntam os chats num timer só. `live_chat_ids` = chats só ao vivo que estavam com
+        `running: true` no último anúncio (§22.6) — o vínculo já sumiu, então contam sem conferir o banco."""
+        live_ids = list(live_chat_ids or [])
+        if self.fcm is None or self._closing or not (chat_ids or live_ids):
             return
         key = (user_id, device_id)
         cur = self._offline.get(key)
         if cur is not None and not cur[0].done():
             cur[1].update(chat_ids)
+            cur[2].update(live_ids)
             return
         chats = set(chat_ids)
+        live = set(live_ids)
         delay = (dropped_at + timedelta(seconds=self.settings.host_offline_push_delay_s) - utcnow()).total_seconds()
 
         async def runner() -> None:
@@ -225,15 +247,17 @@ class PushService:
                 await asyncio.sleep(max(0.0, delay))
                 if self._offline.get(key, (None,))[0] is asyncio.current_task():
                     self._offline.pop(key, None)
-                await self._host_offline_due(user_id, device_id, chats)
+                await self._host_offline_due(user_id, device_id, chats, live)
             except asyncio.CancelledError:
                 pass
             except Exception:
                 log.exception("push: erro no aviso de host offline")
 
-        self._offline[key] = (asyncio.create_task(runner()), chats)
+        self._offline[key] = (asyncio.create_task(runner()), chats, live)
 
-    async def _host_offline_due(self, user_id: uuid.UUID, device_id: uuid.UUID, chats: set[str]) -> None:
+    async def _host_offline_due(
+        self, user_id: uuid.UUID, device_id: uuid.UUID, chats: set[str], live: set[str] | None = None
+    ) -> None:
         if self.hub.is_online(device_id):
             return
         cooldown = timedelta(seconds=self.settings.host_offline_push_cooldown_s)
@@ -247,13 +271,17 @@ class PushService:
             if dev is None:
                 return
             # ainda é o host de algum dos chats que rodavam e continua fora (ninguém assumiu, não voltou)
-            row = await fetchone(
-                conn,
-                "SELECT chat_id FROM chat_states WHERE user_id = :u AND host_device_id = :d "
-                "AND host_dropped_at IS NOT NULL AND chat_id = ANY(CAST(:c AS text[])) ORDER BY chat_id LIMIT 1",
-                {"u": user_id, "d": device_id, "c": sorted(chats)},
-            )
-            if row is None:
+            row = None
+            if chats:
+                row = await fetchone(
+                    conn,
+                    "SELECT chat_id FROM chat_states WHERE user_id = :u AND host_device_id = :d "
+                    "AND host_dropped_at IS NOT NULL AND chat_id = ANY(CAST(:c AS text[])) ORDER BY chat_id LIMIT 1",
+                    {"u": user_id, "d": device_id, "c": sorted(chats)},
+                )
+            # de preferência um chat online (um chat só ao vivo some junto com o host, §22.6)
+            chat_id = row.chat_id if row is not None else (min(live) if live else None)
+            if chat_id is None:
                 return
             now = utcnow()
             if dev.offline_push_at is not None and now - dev.offline_push_at < cooldown:
@@ -268,7 +296,14 @@ class PushService:
                 "WHERE id = :d",
                 {"t": tag, "now": now, "d": device_id},
             )
-        self.dispatch(targets, "host_offline", tag, "", {"chat_id": row.chat_id, "device_name": dev.name})
+        self.dispatch(
+            targets,
+            "host_offline",
+            tag,
+            "",
+            {"chat_id": chat_id, "device_name": dev.name, "device_id": str(device_id)},
+            from_device=device_id,
+        )
 
     async def host_back(self, user_id: uuid.UUID, device_id: uuid.UUID) -> None:
         """O host reconectou: cancela o aviso pendente e apaga (`dismiss`) o que foi mostrado."""
@@ -287,7 +322,7 @@ class PushService:
             if dev is None or not dev.offline_push_tag:
                 return
             targets = await push_targets(conn, user_id, device_id, None)
-        self.dispatch(targets, "dismiss", dev.offline_push_tag, "")
+        self.dispatch(targets, "dismiss", dev.offline_push_tag, "", from_device=device_id)
 
     def forget_devices(self, device_ids: list[uuid.UUID]) -> None:
         for key in [k for k in self._offline if k[1] in device_ids]:

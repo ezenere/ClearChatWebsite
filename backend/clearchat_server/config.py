@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     host_offline_push_delay_s: float = 120
     host_offline_push_cooldown_s: float = 1800
 
+    # chats só ao vivo (§23): vínculos em memória. Desligado = features.liveChats false, o welcome não
+    # devolve a capacidade "live_chats" e os frames live.* são recusados (testa clientes contra servidor
+    # sem suporte). Tetos de vínculos por host / por usuário (§17.1).
+    live_chats_enabled: bool = True
+    live_max_chats_per_host: int = Field(default=500, ge=1)
+    live_max_chats_per_user: int = Field(default=1000, ge=1)
+
     log_level: str = "info"
     log_format: Literal["json", "text"] = "json"
     # desliga os jobs periódicos (testes chamam o GC na mão)

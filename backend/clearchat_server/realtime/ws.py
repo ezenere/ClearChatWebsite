@@ -24,6 +24,7 @@ from ..sync.routes import after_push, payload_flag
 from ..util import client_ip, iso, utcnow
 from .coordinator import access_error, revoked_reason
 from .hub import Conn
+from .live import LIVE_CAP
 
 log = logging.getLogger("clearchat.ws")
 
@@ -73,6 +74,8 @@ async def h_push(ctx: AppContext, c: Conn, d: dict[str, Any]) -> dict[str, Any]:
     if reason is not None:
         raise access_error(reason)
     body = {k: v for k, v in d.items() if k not in ("t", "id")}
+    # chat só ao vivo de outro dispositivo → o lote inteiro é recusado (§23.3)
+    ctx.coordinator.live.check_push(c.user_id, c.device_id, body)
     try:
         outcome = await records.push(
             ctx.engine,
@@ -87,7 +90,7 @@ async def h_push(ctx: AppContext, c: Conn, d: dict[str, Any]) -> dict[str, Any]:
         for st in e.broadcast:
             ctx.coordinator.broadcast_state(c.user_id, st)
         raise
-    await after_push(ctx, c.user_id, outcome)
+    await after_push(ctx, c.user_id, outcome, c.device_id)
     return outcome.response
 
 
@@ -105,10 +108,16 @@ HANDLERS: dict[str, Handler] = {
     "stream.subscribe": lambda ctx, c, d: ctx.coordinator.stream_subscribe(c, d.get("chat_ids")),
     "stream.unsubscribe": lambda ctx, c, d: ctx.coordinator.stream_unsubscribe(c, d.get("chat_ids")),
     "stream.resync": lambda ctx, c, d: ctx.coordinator.stream_resync(c, d),
+    # chats só ao vivo (§23.4): na fila, em ordem com os sync.push do host (conversões, §23.8)
+    "live.announce": lambda ctx, c, d: ctx.coordinator.live.announce(c, d),
+    "live.withdraw": lambda ctx, c, d: ctx.coordinator.live.withdraw(c, d),
 }
 # rápidos, só memória: tratados na hora (não esperam a fila)
 INLINE: dict[str, Handler] = {
     "remote.result": lambda ctx, c, d: ctx.coordinator.remote_result(c, d),
+    # só memória; o ack entra na fila de envio na ordem dos eventos live.* (§23.4)
+    "live.list": lambda ctx, c, d: ctx.coordinator.live.list_chats(c, d),
+    "live.refresh": lambda ctx, c, d: ctx.coordinator.live.refresh(c, d),
 }
 
 
@@ -221,6 +230,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
         return
 
     c = Conn(ws, p.user_id, p.device_id, p.device_name, p.platform, p.client, p.can_host)
+    # capacidades opcionais (§10.3): só as que o servidor entende e tem ligadas; o resto é ignorado
+    caps = hello.get("caps")
+    if isinstance(caps, list) and ctx.settings.live_chats_enabled and LIVE_CAP in caps[:64]:
+        c.caps.add(LIVE_CAP)
     old = ctx.hub.register(c)
     if old is not None:
         old.close(CLOSE_SUPERSEDED, "superseded")
@@ -264,9 +277,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 "resumed_windows": resumed,
                 "lost_windows": lost,
                 "keys_rev": int(user.keys_rev),
+                "caps": sorted(c.caps),
             }
         )
         c.start()
+        # host com vínculos ao vivo de antes da queda: sai da tolerância e tem o prazo para reanunciar
+        ctx.coordinator.live.on_welcome(c)
         for m in after:
             c.send(m)
         subs = hello.get("subscriptions")

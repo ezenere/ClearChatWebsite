@@ -180,13 +180,14 @@ export class MockServer {
       name: c.name,
       server_version: '0.1.0-mock',
       base_url: typeof location !== 'undefined' ? location.origin : 'http://localhost',
-      protocol: { min: 1, max: 1, version: '1.7.0' },
+      protocol: { min: 1, max: 1, version: '1.8.0' },
       features: {
         signupOpen: c.signupOpen,
         captcha: c.captcha ? { provider: 'turnstile', siteKey: 'mock-site-key' } : null,
         landing: c.landing,
         gateway: false,
-        push: null
+        push: null,
+        liveChats: false
       },
       links: {
         download: 'https://github.com/ezenere/ClearChatDesktop/releases',

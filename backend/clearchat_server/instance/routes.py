@@ -30,6 +30,7 @@ async def info(ctx: AppContext = Depends(get_ctx)) -> Any:
             "landing": inst.landing_enabled,
             "gateway": False,
             "push": ctx.push.features(),
+            "liveChats": s.live_chats_enabled,
         },
         "links": links,
     }

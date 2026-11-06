@@ -15,6 +15,8 @@ export interface InstanceInfo {
     gateway: boolean
     /** Notificações push (desde 1.7.0); null = instância sem push. */
     push?: { providers: string[] } | null
+    /** Chats só ao vivo (desde 1.8.0, §23); ausente/false = sem suporte. */
+    liveChats?: boolean
   }
   links: { download?: string; signup?: string }
 }
