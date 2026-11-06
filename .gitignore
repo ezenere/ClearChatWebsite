@@ -3,6 +3,7 @@
 *.env.local
 *.pem
 *.key
+secrets/
 
 # node
 node_modules/
