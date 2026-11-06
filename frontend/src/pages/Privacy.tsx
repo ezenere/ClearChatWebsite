@@ -19,6 +19,7 @@ const SECTIONS = [
   { id: 'provedores-ia', title: 'Provedores de IA e de voz' },
   { id: 'terceiros', title: 'Serviços de terceiros' },
   { id: 'android', title: 'Permissões do app Android' },
+  { id: 'localizacao', title: 'Localização' },
   { id: 'finalidades', title: 'Finalidades e bases legais' },
   { id: 'nao-fazemos', title: 'O que não fazemos' },
   { id: 'retencao', title: 'Por quanto tempo guardamos' },
@@ -344,6 +345,16 @@ export default function Privacy() {
                   .
                 </li>
                 <li>
+                  <B>OpenStreetMap</B> (Overpass, Nominatim e Photon): quando você permite o uso da
+                  localização, as coordenadas (aproximadas ou exatas) vão direto do aparelho para
+                  esses serviços públicos, para achar lugares próximos e nomes de endereços,
+                  conforme a{' '}
+                  <Ext href="https://osmfoundation.org/wiki/Privacy_Policy">
+                    política de privacidade da OpenStreetMap Foundation
+                  </Ext>
+                  .
+                </li>
+                <li>
                   <B>Envio de e-mail</B>: os códigos de acesso são enviados para o seu endereço por
                   um servidor de e-mail (SMTP).
                 </li>
@@ -371,6 +382,17 @@ export default function Privacy() {
                   <B>Fotos e arquivos</B>: apenas os itens que você escolhe anexar.
                 </li>
                 <li>
+                  <B>Localização</B> (aproximada por padrão; exata só se você escolher): somente com
+                  o app aberto, quando o assistente precisa dela e você aprova — veja{' '}
+                  <a
+                    href="#localizacao"
+                    className="text-accent-strong underline decoration-accent/40 underline-offset-2"
+                  >
+                    Localização
+                  </a>
+                  .
+                </li>
+                <li>
                   <B>Notificações</B>: para exibir os avisos do app no seu celular.
                 </li>
                 <li>
@@ -382,6 +404,34 @@ export default function Privacy() {
                   configurou.
                 </li>
               </List>
+            </Section>
+
+            <Section id="localizacao">
+              <p>
+                Nos chats executados no celular, o assistente pode usar a sua localização para
+                responder perguntas como "onde estou?" ou "restaurantes perto de mim". O app só lê a
+                localização <B>com o app aberto, nunca em segundo plano</B>, e por padrão pede a sua
+                aprovação a cada uso. Também por padrão a localização é <B>aproximada</B>: as
+                coordenadas são arredondadas a cerca de 1 km antes de sair do aparelho. Você pode
+                escolher a localização exata, "Sempre permitir" ou "Nunca" em Configurações →
+                Localização, e revogar a permissão a qualquer momento nas configurações do sistema.
+              </p>
+              <p>
+                Quando você permite, a localização é enviada diretamente do seu aparelho para: (1) o
+                provedor de IA do modelo usado no chat, junto com a conversa; (2) o OpenStreetMap,
+                pelos serviços públicos Overpass (lugares próximos), Nominatim e Photon (nome do
+                lugar e busca de endereços); e (3) o serviço de geocodificação do sistema do
+                aparelho (Google no Android, Apple no iPhone), para obter o nome do bairro e da
+                cidade. Cada um desses serviços trata os dados conforme a própria política de
+                privacidade.
+              </p>
+              <p>
+                A localização <B>não é enviada ao servidor do ClearChat</B> nem armazenada por nós.
+                O resultado da ferramenta (coordenadas, nome do lugar e lugares encontrados) fica no
+                histórico do chat, como qualquer mensagem: com conta, ele é sincronizado com
+                criptografia de ponta a ponta (o servidor não consegue ler); sem conta, fica só no
+                seu aparelho. Apagar o chat apaga esse histórico.
+              </p>
             </Section>
 
             <Section id="finalidades">
