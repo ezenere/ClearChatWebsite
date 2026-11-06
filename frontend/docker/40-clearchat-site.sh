@@ -1,6 +1,6 @@
 #!/bin/sh
 # Gera, no start do container, a parte do site que depende de PUBLIC_BASE_URL (self-host em qualquer
-# host/porta/caminho): config.js, <base href> do index.html e o server block do nginx.
+# host/porta/caminho) e de PRIVACY_CONTACT_EMAIL: config.js, <base href> do index.html e o server block do nginx.
 set -eu
 
 BASE_URL="${PUBLIC_BASE_URL:-}"
@@ -16,6 +16,13 @@ if printf '%s' "$BASE_URL" | grep -q '[^A-Za-z0-9._~:/%@+-]'; then
   exit 1
 fi
 
+# E-mail de contato da política de privacidade (/privacidade); vazio = a página manda falar com o operador.
+CONTACT_EMAIL="${PRIVACY_CONTACT_EMAIL:-}"
+if [ -n "$CONTACT_EMAIL" ] && ! printf '%s' "$CONTACT_EMAIL" | grep -Eq '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'; then
+  echo "clearchat-site: PRIVACY_CONTACT_EMAIL inválido" >&2
+  exit 1
+fi
+
 BASE_PATH=""
 if [ -n "$BASE_URL" ]; then
   REST="${BASE_URL#*://}"
@@ -28,7 +35,7 @@ NGX="${CLEARCHAT_NGINX_DIR:-/etc/nginx}"
 rm -rf "$ROOT"
 mkdir -p "$ROOT$BASE_PATH"
 cp -R "$SRC"/. "$ROOT$BASE_PATH/"
-printf 'window.__CLEARCHAT__ = { baseUrl: "%s" }\n' "$BASE_URL" > "$ROOT$BASE_PATH/config.js"
+printf 'window.__CLEARCHAT__ = { baseUrl: "%s", contactEmail: "%s" }\n' "$BASE_URL" "$CONTACT_EMAIL" > "$ROOT$BASE_PATH/config.js"
 sed -i "s#<base href=\"/\" */\?>#<base href=\"$BASE_PATH/\" />#" "$ROOT$BASE_PATH/index.html"
 
 mkdir -p "$NGX/conf.d"

@@ -1091,6 +1091,9 @@ export default function Landing() {
             <a href={SERVER_REPO_URL} rel="noopener" className="hover:text-fg">
               Servidor
             </a>
+            <Link to="/privacidade" className="hover:text-fg">
+              Privacidade
+            </Link>
             <Link to="/login" className="hover:text-fg">
               Entrar
             </Link>

@@ -4,11 +4,20 @@
 
 declare global {
   interface Window {
-    __CLEARCHAT__?: { baseUrl?: string }
+    __CLEARCHAT__?: { baseUrl?: string; contactEmail?: string }
   }
 }
 
 export const SITE_VERSION: string = import.meta.env.VITE_SITE_VERSION || '0.1.0'
+
+/**
+ * E-mail de contato da política de privacidade (`PRIVACY_CONTACT_EMAIL` do container; em desenvolvimento
+ * `VITE_PRIVACY_CONTACT_EMAIL`). Vazio = instância sem contato configurado.
+ */
+export function contactEmail(): string {
+  const v = typeof window !== 'undefined' ? window.__CLEARCHAT__?.contactEmail : undefined
+  return (v || import.meta.env.VITE_PRIVACY_CONTACT_EMAIL || '').trim()
+}
 
 /** Caminho de base sem "/" final ("" = raiz). Ex.: "/clearchat". */
 export function basePath(): string {

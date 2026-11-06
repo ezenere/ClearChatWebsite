@@ -22,6 +22,7 @@ import Unlock from './pages/Unlock'
 import Recover from './pages/Recover'
 import Captcha, { CaptchaDone } from './pages/Captcha'
 import NotFound from './pages/NotFound'
+import Privacy from './pages/Privacy'
 import PanelLayout from './pages/panel/PanelLayout'
 import Chats from './pages/panel/Chats'
 import Providers from './pages/panel/Providers'
@@ -160,6 +161,7 @@ const router = createBrowserRouter(
         { path: '/recover', element: <Recover /> },
         { path: '/captcha', element: <Captcha /> },
         { path: '/captcha/done', element: <CaptchaDone /> },
+        { path: '/privacidade', element: <Privacy /> },
         {
           path: '/app',
           element: (
