@@ -93,8 +93,10 @@ set_env FCM_SERVICE_ACCOUNT_FILE "/run/secrets/clearchat/$KEY_NAME"
 set_env PRIVACY_CONTACT_EMAIL "$CONTACT" only-if-missing
 
 docker compose up -d --build < /dev/null 2>&1 | tail -15
+API_PORT="$(grep -E '^API_PORT=' .env | tail -1 | cut -d= -f2)"
+API_PORT="${API_PORT:-8100}"
 for i in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:8100/api/info > /tmp/clearchat-info.json 2>/dev/null; then break; fi
+  if curl -fsS "http://127.0.0.1:$API_PORT/api/info" > /tmp/clearchat-info.json 2>/dev/null; then break; fi
   sleep 2
 done
 echo "→ /api/info:"
