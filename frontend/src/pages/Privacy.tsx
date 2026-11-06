@@ -558,9 +558,6 @@ export default function Privacy() {
                   );
                 </li>
                 <li>
-                  <B>Portabilidade</B> dos dados a outro fornecedor;
-                </li>
-                <li>
                   <B>Informação</B> sobre com quem os dados são compartilhados e sobre as
                   consequências de não fornecer consentimento, quando for o caso.
                 </li>
