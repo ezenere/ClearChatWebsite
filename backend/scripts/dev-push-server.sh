@@ -29,14 +29,15 @@ shopt -u nullglob
 [[ ${#keys[@]} -eq 1 ]] || { echo "esperava 1 chave em ClearChatWebsite/secrets/ (achei ${#keys[@]})" >&2; exit 1; }
 
 docker --context "${DOCKER_CONTEXT:-desktop-linux}" start clearchat-backend-pytest >/dev/null
-for _ in $(seq 1 30); do
-  (echo > /dev/tcp/127.0.0.1/55440) 2>/dev/null && break
+DC=(docker --context "${DOCKER_CONTEXT:-desktop-linux}")
+# espera o Postgres aceitar conexões (a porta abre antes, pelo proxy do Docker)
+for _ in $(seq 1 60); do
+  "${DC[@]}" exec clearchat-backend-pytest pg_isready -U postgres -q && break
   sleep 1
 done
-docker --context "${DOCKER_CONTEXT:-desktop-linux}" exec clearchat-backend-pytest \
-  psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='clearchat_push_dev'" | grep -q 1 \
-  || docker --context "${DOCKER_CONTEXT:-desktop-linux}" exec clearchat-backend-pytest \
-    psql -U postgres -c "CREATE DATABASE clearchat_push_dev" >/dev/null
+exists="$("${DC[@]}" exec clearchat-backend-pytest psql -U postgres -tAc \
+  "SELECT 1 FROM pg_database WHERE datname='clearchat_push_dev'")"
+[[ "$exists" == 1 ]] || "${DC[@]}" exec clearchat-backend-pytest psql -U postgres -c "CREATE DATABASE clearchat_push_dev" >/dev/null
 
 export DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55440/clearchat_push_dev
 export SERVER_SECRET=local-dev-secret-0123456789abcdef
