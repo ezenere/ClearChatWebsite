@@ -26,6 +26,17 @@ VERIFY_PER_EMAIL_HOUR = 200
 VERIFY_PER_IP_HOUR = 30
 
 
+REVIEW_PURPOSES = ("login", "signup")
+
+
+def review_code(ctx: AppContext, email: str, purpose: str) -> str | None:
+    """Código fixo da conta de revisão (REVIEW_LOGIN_EMAIL/CODE), só para login e cadastro; senão None."""
+    st = ctx.settings
+    if purpose in REVIEW_PURPOSES and st.review_login_email and st.review_login_code and email == st.review_login_email:
+        return st.review_login_code
+    return None
+
+
 def email_key(ctx: AppContext, email: str) -> str:
     return email_hash(ctx.settings.secret_bytes(), email).hex()
 
@@ -72,7 +83,7 @@ async def issue_code(
         "AND consumed_at IS NULL AND invalidated_at IS NULL",
         {"e": eh, "p": purpose},
     )
-    code = new_code()
+    code = review_code(ctx, email, purpose) or new_code()
     await execute(
         conn,
         "INSERT INTO email_codes (email_hash, purpose, code_hash, user_id, pending_name, invite_id, expires_at, ip) "

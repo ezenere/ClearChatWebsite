@@ -19,7 +19,7 @@ from ..ratelimit import HOUR, Limit
 from ..security import sha256, token_hash
 from ..services.accounts import log_activity, revoke_devices
 from ..util import normalize_email, utcnow, valid_email
-from .codes import issue_code, request_limits, verify_code
+from .codes import issue_code, request_limits, review_code, verify_code
 from .deps import current_principal
 from .tokens import Principal, create_device, find_reused_refresh, issue_tokens
 from .turnstile import verify_turnstile
@@ -187,11 +187,12 @@ async def signup_start(request: Request, background: BackgroundTasks, ctx: AppCo
         user = await fetchone(conn, "SELECT id, status FROM users WHERE email = :e", {"e": email})
         if user is None:
             code = await issue_code(conn, ctx, email, "signup", pending_name=name, invite_id=invite_id, ip=ip)
-            background.add_task(
-                ctx.mailer.send, code_mail(email, code, "signup", inst.instance_name, ctx.settings.email_code_ttl_s)
-            )
+            if review_code(ctx, email, "signup") is None:  # conta de revisão: código fixo, sem e-mail
+                background.add_task(
+                    ctx.mailer.send, code_mail(email, code, "signup", inst.instance_name, ctx.settings.email_code_ttl_s)
+                )
         else:
-            if user.status == "active":
+            if user.status == "active" and review_code(ctx, email, "signup") is None:
                 login_url = f"{ctx.settings.public_base_url}/login"
                 background.add_task(ctx.mailer.send, existing_account_mail(email, inst.instance_name, login_url))
             # conta banida: nada é enviado (resposta idêntica)
@@ -262,9 +263,10 @@ async def code_request(request: Request, background: BackgroundTasks, ctx: AppCo
         user = await fetchone(conn, "SELECT id, status FROM users WHERE email = :e", {"e": email})
         if user is not None and user.status == "active":
             code = await issue_code(conn, ctx, email, "login", user_id=user.id, ip=ip)
-            background.add_task(
-                ctx.mailer.send, code_mail(email, code, "login", inst.instance_name, ctx.settings.email_code_ttl_s)
-            )
+            if review_code(ctx, email, "login") is None:  # conta de revisão: código fixo, sem e-mail
+                background.add_task(
+                    ctx.mailer.send, code_mail(email, code, "login", inst.instance_name, ctx.settings.email_code_ttl_s)
+                )
         else:
             await issue_code(conn, ctx, email, "login", ip=ip)  # código fantasma (ver "Códigos fantasmas")
     return {"ok": True}

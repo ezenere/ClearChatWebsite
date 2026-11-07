@@ -6,7 +6,9 @@
 #
 # Variáveis: DEPLOY_TARGET (padrão ezenere@172.16.1.7), DEPLOY_DIR (padrão /srv/websites/clear-chat),
 # FCM_KEY_FILE (JSON da conta de serviço do Firebase; padrão: o único secrets/*-firebase-adminsdk-*.json),
-# PRIVACY_CONTACT_EMAIL (padrão suporte@ezenere.com; só é gravado se o .env ainda não tiver).
+# PRIVACY_CONTACT_EMAIL (padrão suporte@ezenere.com; só é gravado se o .env ainda não tiver),
+# REVIEW_FILE (padrão secrets/review-login.env, se existir: REVIEW_LOGIN_EMAIL= e REVIEW_LOGIN_CODE= da conta
+# de revisão das lojas; vai por arquivo, nunca pela linha de comando, e é gravado no .env do servidor).
 #
 # No servidor: 1) backup em .backups/<data>/ (pg_dump do banco + código + .env); 2) troca o código
 # (admin/ backend/ deploy/ docs/ frontend/ e arquivos da raiz; .env, secrets/ e .backups/ ficam);
@@ -31,6 +33,15 @@ fi
 KEY_NAME="$(basename "$FCM_KEY_FILE")"
 [[ "$KEY_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "nome de arquivo da chave inválido" >&2; exit 1; }
 
+REVIEW_FILE="${REVIEW_FILE:-secrets/review-login.env}"
+REVIEW_NOTE="conta de revisão: sem mudança"
+if [[ -f "$REVIEW_FILE" ]]; then
+  grep -qE '^REVIEW_LOGIN_EMAIL=[^[:space:]|]+@[^[:space:]|]+$' "$REVIEW_FILE" \
+    && grep -qE '^REVIEW_LOGIN_CODE=[0-9]{6}$' "$REVIEW_FILE" \
+    || { echo "$REVIEW_FILE inválido (REVIEW_LOGIN_EMAIL=… e REVIEW_LOGIN_CODE=6 dígitos)" >&2; exit 1; }
+  REVIEW_NOTE="conta de revisão: $(grep -E '^REVIEW_LOGIN_EMAIL=' "$REVIEW_FILE" | cut -d= -f2) (código de $REVIEW_FILE)"
+fi
+
 COMMIT="$(git rev-parse --short HEAD)"
 if [[ -n "$(git status --porcelain -- . ':!secrets')" ]]; then
   echo "aviso: há mudanças não commitadas — só o commit $COMMIT vai para o servidor."
@@ -41,6 +52,7 @@ fi
 
 echo "Deploy de $COMMIT ($(git log -1 --format=%s | cut -c1-70)) → $TARGET:$DIR"
 echo "Chave do Firebase: $KEY_NAME · contato da privacidade: $CONTACT"
+echo "$REVIEW_NOTE"
 if [[ "${1:-}" != "--yes" ]]; then
   read -rp "Continuar? [s/N] " ok
   [[ "$ok" == s || "$ok" == S ]] || { echo "cancelado"; exit 1; }
@@ -53,6 +65,9 @@ git archive --format=tar.gz -o "$TMP/release.tgz" HEAD
 echo "→ enviando código e chave"
 ssh "$TARGET" "mkdir -p '$DIR/.incoming' && cat > '$DIR/.incoming/release.tgz'" < "$TMP/release.tgz"
 ssh "$TARGET" "umask 077 && cat > '$DIR/.incoming/$KEY_NAME'" < "$FCM_KEY_FILE"
+if [[ -f "$REVIEW_FILE" ]]; then
+  grep -E '^REVIEW_LOGIN_(EMAIL|CODE)=' "$REVIEW_FILE" | ssh "$TARGET" "umask 077 && cat > '$DIR/.incoming/review-login.env'"
+fi
 
 echo "→ backup, troca do código e subida"
 ssh "$TARGET" "DIR='$DIR' KEY_NAME='$KEY_NAME' CONTACT='$CONTACT' bash -s" <<'REMOTE'
@@ -76,7 +91,6 @@ rm -f .incoming/release.tgz
 mkdir -p secrets
 chmod 711 secrets
 mv -f ".incoming/$KEY_NAME" "secrets/$KEY_NAME"
-rmdir .incoming
 # o container roda como uid 10001; ajusta o dono por um container descartável (a imagem já está aqui)
 docker run --rm -v "$PWD/secrets:/s" --entrypoint sh postgres:17-alpine \
   -c "chown 10001 '/s/$KEY_NAME' && chmod 400 '/s/$KEY_NAME'" < /dev/null
@@ -91,6 +105,12 @@ set_env() {  # set_env NOME VALOR [só_se_ausente]
 }
 set_env FCM_SERVICE_ACCOUNT_FILE "/run/secrets/clearchat/$KEY_NAME"
 set_env PRIVACY_CONTACT_EMAIL "$CONTACT" only-if-missing
+if [[ -f .incoming/review-login.env ]]; then
+  set_env REVIEW_LOGIN_EMAIL "$(grep -E '^REVIEW_LOGIN_EMAIL=' .incoming/review-login.env | cut -d= -f2)"
+  set_env REVIEW_LOGIN_CODE "$(grep -E '^REVIEW_LOGIN_CODE=' .incoming/review-login.env | cut -d= -f2)"
+  rm -f .incoming/review-login.env
+fi
+rmdir .incoming 2>/dev/null || true
 
 docker compose up -d --build < /dev/null 2>&1 | tail -15
 API_PORT="$(grep -E '^API_PORT=' .env | tail -1 | cut -d= -f2)"

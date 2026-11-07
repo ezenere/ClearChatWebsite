@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from functools import cached_property
 from typing import Literal
 from urllib.parse import urlsplit
@@ -127,6 +128,13 @@ class Settings(BaseSettings):
     # painel admin servido por https (proxy TLS na frente): cookie de sessão com Secure
     admin_https: bool = False
 
+    # conta de revisão (Google Play / App Store): este e-mail recebe sempre o código fixo abaixo no
+    # cadastro e no login (sem e-mail enviado), com os mesmos limites de tentativa. Só login/cadastro:
+    # reautenticação (apagar conta, revogar aparelhos) continua com código aleatório por e-mail.
+    # Os dois vazios = desligado. O código é uma senha permanente dessa conta: só dados de demonstração.
+    review_login_email: str = ""
+    review_login_code: str = ""
+
     @field_validator(
         "default_quota_record_bytes",
         "default_quota_records",
@@ -138,6 +146,19 @@ class Settings(BaseSettings):
     def _empty_is_none(cls, v: object) -> object:
         if isinstance(v, str) and v.strip() == "":
             return None
+        return v
+
+    @field_validator("review_login_email")
+    @classmethod
+    def _review_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+    @field_validator("review_login_code")
+    @classmethod
+    def _review_code(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.fullmatch(r"[0-9]{6}", v):
+            raise ValueError("REVIEW_LOGIN_CODE deve ter 6 dígitos")
         return v
 
     @field_validator("public_base_url")
