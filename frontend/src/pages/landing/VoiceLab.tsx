@@ -13,9 +13,9 @@ const CAPTION: Record<Stage, string> = {
   listening: 'Ouvindo… a transcrição já começa enquanto você fala.',
   stt: 'Silêncio detectado: fim de turno adaptativo.',
   llm: 'O modelo responde em streaming…',
-  filler: '“Hmm, deixa eu ver aqui…” — uma interjeição enquanto ele pensa.',
+  filler: '“Hmm, deixa eu ver aqui…” — um preâmbulo curto enquanto ele pensa.',
   speaking: 'A voz sai frase a frase, antes da resposta terminar.',
-  barge: 'Você interrompeu: o agente para de falar na hora.'
+  barge: 'Você falou por cima: o agente abaixa a voz — se você insiste, ele para e escuta.'
 }
 
 const NODES: { id: string; label: string; icon: typeof Mic; on: Stage[] }[] = [

@@ -12,7 +12,7 @@ const SCRIPT: Line[] = [
   {
     who: 'agent',
     text: 'Hmm, deixa eu ver aqui…',
-    tag: { icon: 'filler', label: 'interjeição enquanto pensa' }
+    tag: { icon: 'filler', label: 'preâmbulo enquanto pensa' }
   },
   {
     who: 'agent',
