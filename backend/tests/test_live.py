@@ -43,7 +43,7 @@ async def sql(q: str, **params: Any) -> list[Any]:
 
 async def test_info_and_caps(srv):
     info = (await srv.http.get("/api/info")).json()
-    assert info["features"]["liveChats"] is True and info["protocol"]["version"] == "1.11.0"
+    assert info["features"]["liveChats"] is True and info["protocol"]["version"] == "1.12.0"
     a = await srv.signup()
     b = await srv.login(a.email, name="Outro")
     # capacidade desconhecida é ignorada; sem caps → lista vazia no welcome
