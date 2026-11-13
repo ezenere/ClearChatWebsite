@@ -8,12 +8,14 @@
 # FCM_KEY_FILE (JSON da conta de serviço do Firebase; padrão: o único secrets/*-firebase-adminsdk-*.json),
 # PRIVACY_CONTACT_EMAIL (padrão suporte@ezenere.com; só é gravado se o .env ainda não tiver),
 # REVIEW_FILE (padrão secrets/review-login.env, se existir: REVIEW_LOGIN_EMAIL= e REVIEW_LOGIN_CODE= da conta
-# de revisão das lojas; vai por arquivo, nunca pela linha de comando, e é gravado no .env do servidor).
+# de revisão das lojas; vai por arquivo, nunca pela linha de comando, e é gravado no .env do servidor),
+# DOWNLOAD_URL (página de releases do app desktop que a landing lê — `links.download` do /api/info;
+# padrão https://github.com/ezenere/ClearChatDesktop/releases; sempre gravado no .env).
 #
 # No servidor: 1) backup em .backups/<data>/ (pg_dump do banco + código + .env); 2) troca o código
 # (admin/ backend/ deploy/ docs/ frontend/ e arquivos da raiz; .env, secrets/ e .backups/ ficam);
 # 3) copia a chave do Firebase para secrets/ (dono uid 10001 do container, modo 400 — via container
-# descartável, sem sudo); 4) acerta FCM_SERVICE_ACCOUNT_FILE e PRIVACY_CONTACT_EMAIL no .env;
+# descartável, sem sudo); 4) acerta FCM_SERVICE_ACCOUNT_FILE, PRIVACY_CONTACT_EMAIL e DOWNLOAD_URL no .env;
 # 5) docker compose up -d --build (a api roda as migrações no start); 6) confere /api/info.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,6 +23,8 @@ cd "$(dirname "$0")/.."
 TARGET="${DEPLOY_TARGET:-ezenere@172.16.1.7}"
 DIR="${DEPLOY_DIR:-/srv/websites/clear-chat}"
 CONTACT="${PRIVACY_CONTACT_EMAIL:-suporte@ezenere.com}"
+DOWNLOADS="${DOWNLOAD_URL:-https://github.com/ezenere/ClearChatDesktop/releases}"
+[[ "$DOWNLOADS" =~ ^https://[A-Za-z0-9._~/:%+-]+$ ]] || { echo "DOWNLOAD_URL inválida: $DOWNLOADS" >&2; exit 1; }
 
 if [[ -z "${FCM_KEY_FILE:-}" ]]; then
   shopt -s nullglob
@@ -52,6 +56,7 @@ fi
 
 echo "Deploy de $COMMIT ($(git log -1 --format=%s | cut -c1-70)) → $TARGET:$DIR"
 echo "Chave do Firebase: $KEY_NAME · contato da privacidade: $CONTACT"
+echo "Downloads (landing): $DOWNLOADS"
 echo "$REVIEW_NOTE"
 if [[ "${1:-}" != "--yes" ]]; then
   read -rp "Continuar? [s/N] " ok
@@ -70,7 +75,7 @@ if [[ -f "$REVIEW_FILE" ]]; then
 fi
 
 echo "→ backup, troca do código e subida"
-ssh "$TARGET" "DIR='$DIR' KEY_NAME='$KEY_NAME' CONTACT='$CONTACT' bash -s" <<'REMOTE'
+ssh "$TARGET" "DIR='$DIR' KEY_NAME='$KEY_NAME' CONTACT='$CONTACT' DOWNLOADS='$DOWNLOADS' bash -s" <<'REMOTE'
 set -euo pipefail
 # os comandos docker recebem </dev/null: este script chega pela entrada padrão (bash -s)
 cd "$DIR"
@@ -105,6 +110,7 @@ set_env() {  # set_env NOME VALOR [só_se_ausente]
 }
 set_env FCM_SERVICE_ACCOUNT_FILE "/run/secrets/clearchat/$KEY_NAME"
 set_env PRIVACY_CONTACT_EMAIL "$CONTACT" only-if-missing
+set_env DOWNLOAD_URL "$DOWNLOADS"
 if [[ -f .incoming/review-login.env ]]; then
   set_env REVIEW_LOGIN_EMAIL "$(grep -E '^REVIEW_LOGIN_EMAIL=' .incoming/review-login.env | cut -d= -f2)"
   set_env REVIEW_LOGIN_CODE "$(grep -E '^REVIEW_LOGIN_CODE=' .incoming/review-login.env | cut -d= -f2)"
@@ -120,7 +126,7 @@ for i in $(seq 1 60); do
   sleep 2
 done
 echo "→ /api/info:"
-python3 -c 'import json;d=json.load(open("/tmp/clearchat-info.json"));print(" protocolo", d["protocol"]["version"], "· push", d["features"].get("push"))' \
+python3 -c 'import json;d=json.load(open("/tmp/clearchat-info.json"));print(" protocolo", d["protocol"]["version"], "· push", d["features"].get("push"), "· downloads", d["links"].get("download"))' \
   || cat /tmp/clearchat-info.json
 rm -f /tmp/clearchat-info.json
 docker compose ps --format '{{.Service}} {{.Status}}'
