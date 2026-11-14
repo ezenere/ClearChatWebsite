@@ -227,7 +227,7 @@ async def test_bad_service_account_disables_push(make_server, tmp_path):
 async def test_info_and_token_registration(psrv):
     r = await psrv.http.get("/api/info")
     assert r.json()["features"]["push"] == {"providers": ["fcm"]}
-    assert r.json()["protocol"]["version"] == "1.12.0"
+    assert r.json()["protocol"]["version"] == "1.13.0"
     pc = await psrv.signup()
     phone = await psrv.login(pc.email, client="mobile", can_host=False, name="Celular")
     devs = await devices(psrv, pc)
