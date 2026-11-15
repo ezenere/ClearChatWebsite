@@ -18,8 +18,19 @@ from ..errors import ApiError
 from ..util import BLOB_ID_RE, RECORD_ID_RE, b64u_encode, iso, utcnow
 from .envelope import Envelope, parse_envelope
 
-KNOWN_TYPES = {"provider", "setting", "preset", "memory_collection", "memory", "chat", "session", "message", "skill"}
-SCOPE_NULL = {"provider", "setting", "preset", "memory_collection", "skill"}
+KNOWN_TYPES = {
+    "provider",
+    "setting",
+    "preset",
+    "memory_collection",
+    "memory",
+    "chat",
+    "session",
+    "message",
+    "skill",
+    "mcp_server",  # conectores (servidores MCP), desde 1.14.0 — §4.3.10
+}
+SCOPE_NULL = {"provider", "setting", "preset", "memory_collection", "skill", "mcp_server"}
 CONTENT = {"session", "message"}
 MAX_ITEMS = 500
 PULL_DEFAULT = 500

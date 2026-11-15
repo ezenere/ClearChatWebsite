@@ -31,6 +31,8 @@ async def info(ctx: AppContext = Depends(get_ctx)) -> Any:
             "gateway": False,
             "push": ctx.push.features(),
             "liveChats": s.live_chats_enabled,
+            # conectores (registros mcp_server, desde 1.14.0 — §4.3.10)
+            "mcpServers": True,
         },
         "links": links,
     }

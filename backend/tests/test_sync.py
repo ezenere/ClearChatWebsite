@@ -249,3 +249,16 @@ async def test_big_change_is_omitted_in_event(srv):
     assert r.status_code == 200
     ev = await c.event("sync.changes")
     assert "env" in ev["changes"][0] and ev["changes"][1].get("omitted") is True
+
+
+async def test_mcp_server_records(srv):
+    """Conectores (1.14.0, §4.3.10): o tipo é aceito, escopo nulo, LWW como os outros; info anuncia."""
+    info = (await srv.http.get("/api/info")).json()
+    assert info["features"]["mcpServers"] is True
+    s = await srv.signup()
+    r = await srv.push(s, [item("mcp_server", "mcp_abc")])
+    assert r.status_code == 200 and r.json()["results"][0]["rev"] == 1
+    r = await srv.push(s, [item("mcp_server", "mcp_x", scope="c1")])
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request"
+    recs = (await srv.http.get("/api/v1/records?type=mcp_server", headers=s.h)).json()
+    assert [x["id"] for x in recs["records"]] == ["mcp_abc"]
