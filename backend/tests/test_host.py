@@ -169,6 +169,26 @@ async def test_remote_branch_commands_relay(srv):
     await ca.no_event("remote.command")
 
 
+async def test_remote_schedule_stop_relay(srv):
+    # protocolo 1.15.0 (§8.6): schedule.stop vai ao host sem janela (não escreve conteúdo) e o resultado
+    # volta ao remetente; kinds parecidos continuam recusados
+    a, b, ca, cb = await setup(srv)
+    await ca.ack("host.begin", chat_id="c1", epoch=None, purpose="run")
+    await ca.ack("host.end", chat_id="c1", epoch=1)
+    e = env()
+    r = await cb.ack("remote.send", chat_id="c1", cmd_id="sch-1", kind="schedule.stop", env=e)
+    assert r["status"] == "delivered"
+    cmd = await ca.event("remote.command")
+    assert cmd["cmd_id"] == "sch-1" and cmd["kind"] == "schedule.stop" and cmd["env"] == e
+    res_env = env()
+    await ca.ack("remote.result", chat_id="c1", cmd_id="sch-1", env=res_env)
+    res = await cb.event("remote.result")
+    assert res == {"t": "remote.result", "chat_id": "c1", "cmd_id": "sch-1", "env": res_env}
+    for kind in ("schedule", "schedule.create", "SCHEDULE.STOP"):
+        err = await cb.err("remote.send", chat_id="c1", cmd_id="y", kind=kind, env=env())
+        assert err["code"] == "invalid_request" and (err.get("details") or {}).get("field") == "kind"
+
+
 async def test_remote_fs_commands_relay(srv):
     # protocolo 1.3.0 (§8.6): arquivos do host — fs.list / fs.read passam sem janela; o resultado de um
     # pedaço cheio (512 KiB crus em base64 → ~0,7 MiB de envelope) cabe em COMMAND_MAX_BYTES, com

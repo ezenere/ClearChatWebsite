@@ -68,6 +68,8 @@ COMMAND_KINDS = {
     # crus em base64 → ~0,7 MiB de envelope, abaixo de COMMAND_MAX_BYTES)
     "fs.list",
     "fs.read",
+    # desde 1.15.0: parar um agendamento do chat no host (sem janela; o resultado volta como os outros)
+    "schedule.stop",
     # desde 1.8.0: só chats com vínculo ao vivo (§23.5, §23.7) — histórico sob demanda, renomear/editar,
     # anexos em pedaços pelo host (nada vira blob)
     *LIVE_ONLY_KINDS,
